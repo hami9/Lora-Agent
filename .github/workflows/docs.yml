@@ -1,0 +1,78 @@
+name: Documentation
+
+on:
+  pull_request:
+  push:
+    branches: ['**']
+    tags: ['docs-v*']
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Validate docs
+    if: ${{ !github.event.deleted }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      commit: ${{ steps.revision.outputs.commit }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
+      - name: Build and validate documentation
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          tag=docs-v0.0.0
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            tag="$GITHUB_REF_NAME"
+            git merge-base --is-ancestor HEAD "refs/remotes/origin/$DEFAULT_BRANCH"
+          fi
+          python3 -B scripts/docs.py package "$tag" --output "$RUNNER_TEMP/docs"
+          (cd "$RUNNER_TEMP/docs" && sha256sum --check SHA256SUMS)
+      - id: revision
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Stage release bundle
+        if: github.ref_type == 'tag' && github.event.created
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: documentation
+          path: ${{ runner.temp }}/docs/
+          if-no-files-found: error
+          retention-days: 3
+
+  release:
+    name: Publish documentation
+    if: github.event_name == 'push' && github.ref_type == 'tag' && github.event.created
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: docs-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: documentation
+          path: bundle
+      - name: Publish validated assets
+        working-directory: bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_COMMIT: ${{ needs.check.outputs.commit }}
+        run: |
+          set -euo pipefail
+          archive="lora-agent-${GITHUB_REF_NAME}.zip"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_REF_NAME" --jq .sha)" = "$BUILD_COMMIT"
+          sha256sum --check SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" "$archive" SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
+            --title "Lora Agent architecture $GITHUB_REF_NAME" \
+            --notes "Architecture specifications from commit $BUILD_COMMIT. Verify the ZIP with SHA256SUMS."
