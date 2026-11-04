@@ -33,7 +33,7 @@ Each ZIP has sorted members, fixed metadata, stored bytes and LF line endings fo
 
 ## Pull requests
 
-The workflow runs `Validate docs` on branch pushes and pull requests using a GitHub-hosted Ubuntu runner. It tests, builds a sample package and checks its digest with a read-only token. It uses no repository secrets. Fork changes run on the pull request event. A reviewer should inspect workflow or release-script changes before merging and re-run the checks after conflict resolution. Configure `Validate docs` as a required status check on the default branch when repository rules are enabled. [Workflow](../.github/workflows/docs.yml)
+The workflow runs `Validate docs` on branch pushes and pull requests using a GitHub-hosted Ubuntu runner. It tests, builds a sample package and checks its digest with a read-only token. On a branch push, the run also exposes the preview ZIP and SHA256SUMS in its documentation artifact for three days. Extract the outer Actions download before verifying the inner ZIP. It uses no repository secrets. Fork changes run on the pull request event. A reviewer should inspect workflow or release-script changes before merging and re-run the checks after conflict resolution. Configure `Validate docs` as a required status check on the default branch when repository rules are enabled. [Workflow](../.github/workflows/docs.yml)
 
 ## Release tags
 

@@ -37,8 +37,8 @@ jobs:
           (cd "$RUNNER_TEMP/docs" && sha256sum --check SHA256SUMS)
       - id: revision
         run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Stage release bundle
-        if: github.ref_type == 'tag' && github.event.created
+      - name: Upload verified bundle
+        if: github.event_name == 'push' && (github.ref_type == 'branch' || github.event.created)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: documentation
