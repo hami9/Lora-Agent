@@ -3,7 +3,7 @@
 use crate::error::LoraError;
 use crate::ports::{HardwareProbePort, WorkerSpawnerPort};
 use crate::store::{now_epoch_ms, ModelLifecycleState, SqliteStore};
-use lora_protocol::{parse_gguf_bytes, ProbedModelMetadata, PINNED_LLAMA_CPP_REVISION};
+use lora_protocol::{parse_gguf_file, ProbedModelMetadata, PINNED_LLAMA_CPP_REVISION};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -194,13 +194,12 @@ impl ModelRegistry {
         self.store
             .insert_model_staging(&temp_id, &display_alias, "pending", file_size)?;
 
-        let copy_res = (|| -> Result<(String, Vec<u8>), LoraError> {
+        let copy_res = (|| -> Result<String, LoraError> {
             let mut src = File::open(source_path)?;
             let mut dst = File::create(&staging_path)?;
             let mut hasher = Sha256::new();
             let mut buf = [0u8; 64 * 1024];
             let mut copied = 0u64;
-            let mut full_bytes = Vec::with_capacity(file_size.min(16 * 1024 * 1024) as usize);
 
             loop {
                 let n = src.read(&mut buf)?;
@@ -215,9 +214,6 @@ impl ModelRegistry {
                 }
                 hasher.update(&buf[..n]);
                 dst.write_all(&buf[..n])?;
-                if full_bytes.len() + n <= 32 * 1024 * 1024 {
-                    full_bytes.extend_from_slice(&buf[..n]);
-                }
             }
             dst.sync_all()?;
             if copied != file_size {
@@ -226,10 +222,10 @@ impl ModelRegistry {
                 ));
             }
             let actual_sha = hex::encode(hasher.finalize());
-            Ok((actual_sha, full_bytes))
+            Ok(actual_sha)
         })();
 
-        let (actual_sha256, staged_bytes) = match copy_res {
+        let actual_sha256 = match copy_res {
             Ok(v) => v,
             Err(e) => {
                 let _ = fs::remove_file(&staging_path);
@@ -275,8 +271,8 @@ impl ModelRegistry {
             });
         }
 
-        // Parse GGUF structure and validate bounds
-        let parsed = match parse_gguf_bytes(&staged_bytes) {
+        // Parse the GGUF header from the staged copy (header region only) and validate bounds
+        let parsed = match parse_gguf_file(&staging_path) {
             Ok(p) => p,
             Err(gguf_err) => {
                 let _ = fs::remove_file(&staging_path);

@@ -8,7 +8,10 @@ pub mod gguf;
 pub mod messages;
 
 pub use frame::{encode_frame_str, read_frame_str, write_frame_str, FrameError, MAX_FRAME_BYTES};
-pub use gguf::{build_synthetic_gguf, parse_gguf_bytes, GgufError, ParsedGguf, SyntheticGgufSpec};
+pub use gguf::{
+    build_synthetic_gguf, parse_gguf_bytes, parse_gguf_file, parse_gguf_reader, sha256_file,
+    sha256_reader, GgufError, ParsedGguf, SyntheticGgufSpec,
+};
 pub use messages::{
     negotiate_version, read_host_request, read_worker_event, validate_nonce, write_host_request,
     write_worker_event, FinishReason, GenerationUsage, HostRequest, ProbedModelMetadata,

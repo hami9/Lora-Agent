@@ -21,12 +21,10 @@ use backend::{select_backend, BackendChoice};
 use cancel::CancelState;
 use deterministic::DeterministicBackend;
 use lora_protocol::{
-    negotiate_version, parse_gguf_bytes, read_host_request, validate_nonce, write_frame_str,
-    write_worker_event, HostRequest, ProbedModelMetadata, ProtocolError, WorkerCapabilities,
-    WorkerErrorCode, WorkerEvent,
+    negotiate_version, parse_gguf_file, read_host_request, sha256_file, validate_nonce,
+    write_frame_str, write_worker_event, HostRequest, ProbedModelMetadata, ProtocolError,
+    WorkerCapabilities, WorkerErrorCode, WorkerEvent,
 };
-use sha2::{Digest, Sha256};
-use std::fs;
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
@@ -247,24 +245,23 @@ fn spawn_reader(cancel: Arc<CancelState>, intercept: bool) -> Receiver<Incoming>
 }
 
 /// Digest failures are fatal (outer error); a metadata parse failure is returned separately so
-/// the native backend can fall back to llama.cpp's own reader (the strict MVP parser does not
-/// understand arrays, floats, etc. found in real GGUF files).
+/// the native backend can still fall back to llama.cpp's own reader for files the header parser
+/// refuses (e.g. an architecture outside the qualified list).
 type VerifiedArtifact = Result<ProbedModelMetadata, String>;
 
+/// Hash the artifact in fixed-size chunks and parse only its header; the file is never loaded
+/// into memory as a whole.
 fn verify_artifact(
     path: &str,
     expected_sha256: &str,
 ) -> Result<VerifiedArtifact, (WorkerErrorCode, String)> {
-    let bytes = fs::read(Path::new(path)).map_err(|e| {
+    let path = Path::new(path);
+    let actual_sha = sha256_file(path).map_err(|e| {
         (
             WorkerErrorCode::CorruptArtifact,
             format!("worker cannot read artifact file: {e}"),
         )
     })?;
-
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let actual_sha = hex::encode(hasher.finalize());
     if !expected_sha256.is_empty() && actual_sha != expected_sha256.to_ascii_lowercase() {
         return Err((
             WorkerErrorCode::CorruptArtifact,
@@ -272,7 +269,7 @@ fn verify_artifact(
         ));
     }
 
-    Ok(parse_gguf_bytes(&bytes)
+    Ok(parse_gguf_file(path)
         .map(|p| p.metadata)
         .map_err(|e| e.to_string()))
 }
