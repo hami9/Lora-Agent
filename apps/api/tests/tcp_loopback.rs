@@ -28,6 +28,9 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(openapi_str.contains("\"/v1/capabilities\""));
     assert!(openapi_str.contains("\"/v1/index\""));
     assert!(openapi_str.contains("\"/v1/search\""));
+    assert!(openapi_str.contains("\"/v1/patch/preview\""));
+    assert!(openapi_str.contains("\"/v1/patch/apply\""));
+    assert!(openapi_str.contains("\"/v1/patch/rollback\""));
 
     // 2. Spawn live `lora-api --once` on loopback port and send authenticated GET /v1/capabilities
     let bind_addr = find_free_loopback_addr();
@@ -127,7 +130,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "14",
+            "20",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -285,6 +288,84 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r14.contains("event: citation"));
     assert!(r14.contains("event: run_completed"));
     assert!(r14.contains("azure_cascade_99"));
+
+    // (l) GET /v1/models/{alias} returns full model manifest
+    let r15 = send_http(&format!(
+        "GET /v1/models/api-model HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r15.starts_with("HTTP/1.1 200 OK"));
+    assert!(r15.contains("\"display_alias\":\"api-model\""));
+
+    // (m) POST /v1/patch/preview computes diff and approval digest
+    let guide_sha = lora_protocol::sha256_file(&ws.join("guide.md")).unwrap();
+    let body_prev = serde_json::json!({
+        "scope": ws.to_str().unwrap(),
+        "file": "guide.md",
+        "expected_sha256": guide_sha,
+        "old_snippet": "CONFIG_VALUE=azure_cascade_99",
+        "new_snippet": "CONFIG_VALUE=azure_cascade_100",
+    })
+    .to_string();
+    let r16 = send_http(&format!(
+        "POST /v1/patch/preview HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_prev}",
+        body_prev.len()
+    ));
+    assert!(r16.starts_with("HTTP/1.1 200 OK"));
+    let prev_val: serde_json::Value =
+        serde_json::from_str(r16.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let approval_digest = prev_val["approval_digest"].as_str().unwrap().to_string();
+
+    // (n) POST /v1/patch/apply modifies file and returns CompensatingPatchReceipt
+    let body_apply = serde_json::json!({
+        "scope": ws.to_str().unwrap(),
+        "file": "guide.md",
+        "expected_sha256": guide_sha,
+        "old_snippet": "CONFIG_VALUE=azure_cascade_99",
+        "new_snippet": "CONFIG_VALUE=azure_cascade_100",
+        "approval_digest": approval_digest,
+    })
+    .to_string();
+    let r17 = send_http(&format!(
+        "POST /v1/patch/apply HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_apply}",
+        body_apply.len()
+    ));
+    assert!(r17.starts_with("HTTP/1.1 200 OK"));
+    let rcpt_json = r17.split("\r\n\r\n").nth(1).unwrap();
+    let rcpt_val: serde_json::Value = serde_json::from_str(rcpt_json).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(ws.join("guide.md")).unwrap(),
+        "Rollout deployment guidelines\nCONFIG_VALUE=azure_cascade_100\n"
+    );
+
+    // (o) POST /v1/patch/rollback reverts the file safely
+    let body_rollback = serde_json::json!({
+        "scope": ws.to_str().unwrap(),
+        "receipt": rcpt_val,
+    })
+    .to_string();
+    let r18 = send_http(&format!(
+        "POST /v1/patch/rollback HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_rollback}",
+        body_rollback.len()
+    ));
+    assert!(r18.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(
+        std::fs::read_to_string(ws.join("guide.md")).unwrap(),
+        "Rollout deployment guidelines\nCONFIG_VALUE=azure_cascade_99\n"
+    );
+
+    // (p) DELETE /v1/models/{alias} retires model and collects unreferenced blob
+    let r19 = send_http(&format!(
+        "DELETE /v1/models/api-model HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r19.starts_with("HTTP/1.1 200 OK"));
+    assert!(r19.contains("\"final_state\":\"collected\""));
+    assert!(r19.contains("\"blob_garbage_collected\":true"));
+
+    // (q) GET retired model now returns 404
+    let r20 = send_http(&format!(
+        "GET /v1/models/api-model HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r20.starts_with("HTTP/1.1 404 Not Found"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());

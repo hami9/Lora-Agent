@@ -4,13 +4,14 @@ use clap::{Parser, Subcommand, ValueEnum};
 use lora_core::{
     allocate_context_budget, apply_approved_patch, classify_artifact_compatibility,
     default_risk_register_matrix, evaluate_adapter_promotion_gate, format_multi_turn_prompt,
-    now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch, validate_catalog_variant,
-    validate_specialist_handoff, AgentLimits, ApprovalDecision, ApprovalPromptPort,
-    ApprovalRequest, BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor, ChatTurn,
-    ContextBudgetRequest, ExecutionMode, ExtensionManifestV1, HardwareProbePort,
-    HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig, PatchProposal,
-    PrivilegedBrokerGate, SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey,
-    TuningProfile, TuningTrialSample, DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
+    now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
+    validate_catalog_variant, validate_specialist_handoff, AgentLimits, ApprovalDecision,
+    ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit, BrokerVerb,
+    CatalogVariantDescriptor, ChatTurn, CompensatingPatchReceipt, ContextBudgetRequest,
+    ExecutionMode, ExtensionManifestV1, HardwareProbePort, HeldOutEvaluationReceipt,
+    LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
+    SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
+    DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -293,6 +294,19 @@ enum Commands {
         /// Apply the patch after verifying the diff preview
         #[arg(long)]
         apply: bool,
+        /// Path to write the CompensatingPatchReceipt JSON file upon successful application
+        #[arg(long)]
+        receipt_out: Option<PathBuf>,
+    },
+
+    /// Roll back an applied patch using a CompensatingPatchReceipt JSON file
+    Rollback {
+        /// Approved local directory scope
+        #[arg(long)]
+        scope: PathBuf,
+        /// Path to CompensatingPatchReceipt JSON file
+        #[arg(long)]
+        receipt: PathBuf,
     },
 
     /// Run bounded HIE thread/batch auto-tuning trials and persist receipt (`docs/HARDWARE_INTELLIGENCE.md`)
@@ -1034,6 +1048,7 @@ fn main() {
             old_snippet,
             new_snippet,
             apply,
+            receipt_out,
         } => {
             let root = app.file_executor.register_root(&scope)?;
             let proposal = PatchProposal {
@@ -1054,7 +1069,25 @@ fn main() {
                     "Patch applied atomically to {} (new sha256={}).",
                     receipt.relative_path, receipt.after_sha256
                 );
+                if let Some(out_path) = receipt_out {
+                    let json = serde_json::to_string_pretty(&receipt)
+                        .map_err(|e| LoraError::Io(format!("failed to serialize receipt: {e}")))?;
+                    std::fs::write(&out_path, json)?;
+                    println!("Compensating receipt saved to {}", out_path.display());
+                }
             }
+            Ok(())
+        }
+        Commands::Rollback { scope, receipt } => {
+            let root = app.file_executor.register_root(&scope)?;
+            let raw = std::fs::read_to_string(&receipt)?;
+            let rcpt: CompensatingPatchReceipt = serde_json::from_str(&raw)
+                .map_err(|e| LoraError::Io(format!("malformed receipt JSON: {e}")))?;
+            rollback_applied_patch(&root, &rcpt)?;
+            println!(
+                "Successfully rolled back patch on {} (restored to sha256={}).",
+                rcpt.relative_path, rcpt.before_sha256
+            );
             Ok(())
         }
         Commands::Tune {

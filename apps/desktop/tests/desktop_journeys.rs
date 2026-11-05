@@ -149,7 +149,7 @@ fn desktop_loopback_bridge_serves_ui_and_view_models() {
             "--serve",
             "127.0.0.1:0",
             "--max-requests",
-            "6",
+            "8",
         ])
         .stdout(Stdio::piped())
         .spawn()
@@ -200,14 +200,25 @@ fn desktop_loopback_bridge_serves_ui_and_view_models() {
         serde_json::from_str(&body).expect("slice json");
     assert_eq!(slice.visible_items.len(), 20);
 
-    // 5. DNS-rebinding defense: foreign Host header is rejected
+    // 5. Risk matrix endpoint returns all verified risk items
+    let (head, body) = get("/api/risk-matrix");
+    assert!(head.starts_with("HTTP/1.1 200"));
+    assert!(body.contains("\"risk_id\": \"R01\""));
+    assert!(body.contains("\"risk_id\": \"R18\""));
+
+    // 6. Probed hardware snapshot endpoint
+    let (head, body) = get("/api/hardware");
+    assert!(head.starts_with("HTTP/1.1 200"));
+    assert!(body.contains("physical_cores"));
+
+    // 7. DNS-rebinding defense: foreign Host header is rejected
     let (head, _) = http_request(
         &addr,
         "GET /api/dashboard HTTP/1.1\r\nHost: evil.example:80\r\nConnection: close\r\n\r\n",
     );
     assert!(head.starts_with("HTTP/1.1 403"));
 
-    // 6. Read-only bridge: non-GET methods are rejected
+    // 8. Read-only bridge: non-GET methods are rejected
     let (head, _) = http_request(
         &addr,
         &format!("POST /api/dashboard HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\n\r\n"),

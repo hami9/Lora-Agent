@@ -1650,3 +1650,75 @@ fn cli_rag_grounded_ask_and_multi_turn_chat_history() {
     assert!(!bad.status.success());
     assert_eq!(fs::read_to_string(&history).unwrap(), "{not json");
 }
+
+/// `v0.1.4`: Supervised Agent patch apply with CompensatingPatchReceipt and rollback in CLI.
+#[test]
+fn cli_patch_apply_with_receipt_and_rollback() {
+    use std::process::Command;
+
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().expect("tempdir");
+    let ws = tmp.path().join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    let file_path = ws.join("config.toml");
+    fs::write(&file_path, "timeout = 30\nretries = 3\n").unwrap();
+
+    let initial_bytes = fs::read(&file_path).unwrap();
+    let initial_sha = format!(
+        "{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(&initial_bytes)
+    );
+    let receipt_path = tmp.path().join("patch_receipt.json");
+
+    // 1. Apply patch and save receipt JSON
+    let patch_out = Command::new(lora_bin)
+        .args([
+            "patch",
+            "--scope",
+            ws.to_str().unwrap(),
+            "--file",
+            "config.toml",
+            "--expected-sha256",
+            &initial_sha,
+            "--old-snippet",
+            "timeout = 30",
+            "--new-snippet",
+            "timeout = 60",
+            "--apply",
+            "--receipt-out",
+            receipt_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        patch_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&patch_out.stderr)
+    );
+    assert!(receipt_path.exists());
+    assert_eq!(
+        fs::read_to_string(&file_path).unwrap(),
+        "timeout = 60\nretries = 3\n"
+    );
+
+    // 2. Rollback using the receipt JSON restores the original file
+    let rollback_out = Command::new(lora_bin)
+        .args([
+            "rollback",
+            "--scope",
+            ws.to_str().unwrap(),
+            "--receipt",
+            receipt_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        rollback_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rollback_out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&file_path).unwrap(),
+        "timeout = 30\nretries = 3\n"
+    );
+}

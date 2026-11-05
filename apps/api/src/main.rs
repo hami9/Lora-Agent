@@ -5,10 +5,11 @@
 
 use clap::Parser;
 use lora_core::{
-    default_risk_register_matrix, now_epoch_ms, validate_loopback_bind,
-    verify_loopback_http_security, AgentLimits, ApiRunManager, ApprovalDecision,
-    ApprovalPromptPort, ApprovalRequest, ExecutionMode, IdempotencyLedger, LoraApplicationService,
-    LoraError, TuningProfile, DEFAULT_SAFETY_RESERVE_BYTES,
+    apply_approved_patch, default_risk_register_matrix, now_epoch_ms, preview_checked_patch,
+    rollback_applied_patch, validate_loopback_bind, verify_loopback_http_security, AgentLimits,
+    ApiRunManager, ApprovalDecision, ApprovalPromptPort, ApprovalRequest, CompensatingPatchReceipt,
+    ExecutionMode, IdempotencyLedger, LoraApplicationService, LoraError, PatchProposal,
+    TuningProfile, DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -260,6 +261,40 @@ fn handle_http_connection(
             let body = serde_json::to_string(&models).unwrap_or_else(|_| "[]".to_string());
             write_http_response(stream, "200 OK", "application/json", &body)
         }
+        ("GET", p) if p.starts_with("/v1/models/") => {
+            let alias = &p["/v1/models/".len()..];
+            match app.registry.resolve_ready_model(alias) {
+                Ok((manifest, _blob_path)) => {
+                    let body = serde_json::to_string(&manifest).unwrap_or_default();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "404 Not Found", "application/json", &err)
+                }
+            }
+        }
+        ("DELETE", p) if p.starts_with("/v1/models/") => {
+            let alias = &p["/v1/models/".len()..];
+            match app.delete_model(alias) {
+                Ok(outcome) => {
+                    let body = serde_json::to_string(&outcome).unwrap_or_default();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "404 Not Found", "application/json", &err)
+                }
+            }
+        }
         ("GET", "/v1/risk-matrix") => {
             let matrix = default_risk_register_matrix();
             let body = serde_json::to_string(&matrix).unwrap_or_else(|_| "[]".to_string());
@@ -453,6 +488,247 @@ fn handle_http_connection(
                         "application/json",
                         &err,
                     )
+                }
+            }
+        }
+        ("POST", "/v1/patch/preview") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let scope_str = req_json.get("scope").and_then(|v| v.as_str()).unwrap_or("");
+            let file = req_json.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            let expected_sha256 = req_json
+                .get("expected_sha256")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let old_snippet = req_json
+                .get("old_snippet")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new_snippet = req_json
+                .get("new_snippet")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if scope_str.is_empty() || file.is_empty() || old_snippet.is_empty() {
+                let err = serde_json::json!({
+                    "code": "missing_parameter",
+                    "detail": "scope, file, and old_snippet are required",
+                })
+                .to_string();
+                return write_http_response(stream, "400 Bad Request", "application/json", &err);
+            }
+            let scope_path = PathBuf::from(scope_str);
+            let root = match app.file_executor.register_root(&scope_path) {
+                Ok(r) => r,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let proposal = PatchProposal {
+                root_id: root.root_id.clone(),
+                relative_path: file.to_string(),
+                expected_before_sha256: expected_sha256.to_string(),
+                old_snippet: old_snippet.to_string(),
+                new_snippet: new_snippet.to_string(),
+            };
+            match preview_checked_patch(&root, &proposal) {
+                Ok(prev) => {
+                    let body = serde_json::to_string(&prev).unwrap_or_default();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("POST", "/v1/patch/apply") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let scope_str = req_json.get("scope").and_then(|v| v.as_str()).unwrap_or("");
+            let file = req_json.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            let expected_sha256 = req_json
+                .get("expected_sha256")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let old_snippet = req_json
+                .get("old_snippet")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new_snippet = req_json
+                .get("new_snippet")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let approval_digest = req_json
+                .get("approval_digest")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if scope_str.is_empty() || file.is_empty() || approval_digest.is_empty() {
+                let err = serde_json::json!({
+                    "code": "missing_parameter",
+                    "detail": "scope, file, and approval_digest are required",
+                })
+                .to_string();
+                return write_http_response(stream, "400 Bad Request", "application/json", &err);
+            }
+            let scope_path = PathBuf::from(scope_str);
+            let root = match app.file_executor.register_root(&scope_path) {
+                Ok(r) => r,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let proposal = PatchProposal {
+                root_id: root.root_id.clone(),
+                relative_path: file.to_string(),
+                expected_before_sha256: expected_sha256.to_string(),
+                old_snippet: old_snippet.to_string(),
+                new_snippet: new_snippet.to_string(),
+            };
+            match apply_approved_patch(&root, &proposal, approval_digest) {
+                Ok(rcpt) => {
+                    let body = serde_json::to_string(&rcpt).unwrap_or_default();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("POST", "/v1/patch/rollback") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let scope_str = req_json.get("scope").and_then(|v| v.as_str()).unwrap_or("");
+            let rcpt_val = req_json.get("receipt");
+            if scope_str.is_empty() || rcpt_val.is_none() {
+                let err = serde_json::json!({
+                    "code": "missing_parameter",
+                    "detail": "scope and receipt are required",
+                })
+                .to_string();
+                return write_http_response(stream, "400 Bad Request", "application/json", &err);
+            }
+            let rcpt: CompensatingPatchReceipt =
+                match serde_json::from_value(rcpt_val.unwrap().clone()) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let err = serde_json::json!({
+                            "code": "malformed_request",
+                            "detail": format!("invalid receipt payload: {e}"),
+                        })
+                        .to_string();
+                        return write_http_response(
+                            stream,
+                            "400 Bad Request",
+                            "application/json",
+                            &err,
+                        );
+                    }
+                };
+            let scope_path = PathBuf::from(scope_str);
+            let root = match app.file_executor.register_root(&scope_path) {
+                Ok(r) => r,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            match rollback_applied_patch(&root, &rcpt) {
+                Ok(()) => {
+                    let body = serde_json::json!({
+                        "status": "rolled_back",
+                        "relative_path": rcpt.relative_path,
+                        "restored_sha256": rcpt.before_sha256,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
                 }
             }
         }

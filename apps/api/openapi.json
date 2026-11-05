@@ -41,6 +41,30 @@
         }
       }
     },
+    "/v1/models/{alias}": {
+      "get": {
+        "summary": "Get verified model manifest metadata by alias or revision ID",
+        "responses": {
+          "200": {
+            "description": "ModelManifestV1 record"
+          },
+          "404": {
+            "description": "Model not found"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Retire model and collect unreferenced content-addressed blobs",
+        "responses": {
+          "200": {
+            "description": "DeleteOutcome summary"
+          },
+          "404": {
+            "description": "Model not found"
+          }
+        }
+      }
+    },
     "/v1/index": {
       "post": {
         "summary": "Index scoped workspace files for SQLite FTS5 lexical RAG retrieval",
@@ -69,6 +93,45 @@
           },
           "403": {
             "description": "Host/Origin rejected or authorization missing"
+          }
+        }
+      }
+    },
+    "/v1/patch/preview": {
+      "post": {
+        "summary": "Preview a checked patch with unified diff and approval digest",
+        "responses": {
+          "200": {
+            "description": "PatchPreview record"
+          },
+          "400": {
+            "description": "Invalid patch or precondition failed"
+          }
+        }
+      }
+    },
+    "/v1/patch/apply": {
+      "post": {
+        "summary": "Atomically apply an approved checked patch and return CompensatingPatchReceipt",
+        "responses": {
+          "200": {
+            "description": "CompensatingPatchReceipt record"
+          },
+          "400": {
+            "description": "Invalid patch or approval digest mismatch"
+          }
+        }
+      }
+    },
+    "/v1/patch/rollback": {
+      "post": {
+        "summary": "Roll back an applied patch using a verified CompensatingPatchReceipt",
+        "responses": {
+          "200": {
+            "description": "Rollback confirmation"
+          },
+          "400": {
+            "description": "File modified since patch or invalid receipt"
           }
         }
       }

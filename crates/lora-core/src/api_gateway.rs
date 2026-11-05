@@ -320,6 +320,8 @@ impl ApiRunManager {
             principal: principal.to_string(),
             enabled_operations: vec![
                 "models.list".to_string(),
+                "models.inspect".to_string(),
+                "models.delete".to_string(),
                 "runs.create".to_string(),
                 "runs.inspect".to_string(),
                 "runs.events.sse".to_string(),
@@ -328,6 +330,9 @@ impl ApiRunManager {
                 "memory.search".to_string(),
                 "agent.assistant".to_string(),
                 "agent.rag".to_string(),
+                "patch.preview".to_string(),
+                "patch.apply".to_string(),
+                "patch.rollback".to_string(),
             ],
             max_request_bytes: 1024 * 1024,
             sse_replay_window_events: self.max_replay_events,

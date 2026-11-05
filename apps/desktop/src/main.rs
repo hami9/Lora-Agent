@@ -4,8 +4,9 @@
 
 use clap::Parser;
 use lora_core::{
-    slice_virtualized_transcript, ApprovalDecision, ApprovalPromptPort, ApprovalRequest,
-    LoraApplicationService, LoraError, TrustedConsentDialogViewModel, DEFAULT_SAFETY_RESERVE_BYTES,
+    default_risk_register_matrix, slice_virtualized_transcript, ApprovalDecision,
+    ApprovalPromptPort, ApprovalRequest, LoraApplicationService, LoraError,
+    TrustedConsentDialogViewModel, DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -156,6 +157,14 @@ fn route_request(
         },
         "/api/models" => match app.registry.list_models() {
             Ok(models) => HttpResponse::json(&models),
+            Err(e) => HttpResponse::error(
+                "500 Internal Server Error",
+                &format!("{:?}", e.reason_code()),
+            ),
+        },
+        "/api/risk-matrix" => HttpResponse::json(&default_risk_register_matrix()),
+        "/api/hardware" => match app.hw_probe.capture_snapshot(data_dir) {
+            Ok(snap) => HttpResponse::json(&snap),
             Err(e) => HttpResponse::error(
                 "500 Internal Server Error",
                 &format!("{:?}", e.reason_code()),
