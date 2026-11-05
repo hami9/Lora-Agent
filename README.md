@@ -26,7 +26,7 @@
 ## Workspace Architecture
 
 ```text
-├── Cargo.toml                  # Workspace root (version = "0.1.7")
+├── Cargo.toml                  # Workspace root (version = "0.1.8")
 ├── crates/
 │   ├── lora-protocol/          # v1 32-bit BE JSON framing, closed schemas & streaming GGUF v2/v3 parser
 │   ├── lora-core/              # App service, SQLite store, registry, HIE, policy gate & RAG
@@ -146,12 +146,21 @@ lora audit
 lora audit --export ./audit_bundle.json
 lora audit --prune-keep 100
 
-# 15. Serve the desktop UI and read-only JSON view-models on loopback only
+# 15. Validate external catalog variant before download
+lora catalog --descriptor ./catalog_variant.json
+
+# 16. Compute deterministic context-window token budgeting
+lora context-budget --window 2048 --output 512 --user 256
+
+# 17. Validate and consume single-use privileged broker permit
+lora broker --service lora-local-service --session sess-1 --nonce nonce-1
+
+# 18. Serve the desktop UI and read-only JSON view-models on loopback only
 lora-desktop --serve 127.0.0.1:8765
 
-# 16. Run the authenticated loopback REST/SSE API (127.0.0.1 / [::1] only)
+# 19. Run the authenticated loopback REST/SSE API (127.0.0.1 / [::1] only)
 lora-api --bind 127.0.0.1:8421 --token "$LORA_API_TOKEN"
-# Endpoints: /v1/health, /v1/capabilities, /v1/models, /v1/runs, /v1/runs/{id}/events, /v1/index, /v1/search, /v1/patch/preview, /v1/patch/apply, /v1/patch/rollback, /v1/plugins, /v1/plugins/stage, /v1/plugins/{id}/activate, /v1/plugins/{id}/disable, /v1/plugins/{id}/fault, /v1/plugins/{id}/rollback, /v1/adapter/evaluate, /v1/adapter/dataset-split, /v1/hardware/tune, /v1/hardware/tuning-receipts, /v1/audit/events, /v1/audit/prune, /v1/audit/export, /v1/egress/preview, /v1/egress/verify
+# Endpoints: /v1/health, /v1/capabilities, /v1/models, /v1/runs, /v1/runs/{id}/events, /v1/index, /v1/search, /v1/patch/preview, /v1/patch/apply, /v1/patch/rollback, /v1/plugins, /v1/plugins/stage, /v1/plugins/{id}/activate, /v1/plugins/{id}/disable, /v1/plugins/{id}/fault, /v1/plugins/{id}/rollback, /v1/adapter/evaluate, /v1/adapter/dataset-split, /v1/hardware/tune, /v1/hardware/tuning-receipts, /v1/audit/events, /v1/audit/prune, /v1/audit/export, /v1/egress/preview, /v1/egress/verify, /v1/catalog/validate, /v1/context-budget, /v1/broker/validate
 ```
 
 ---

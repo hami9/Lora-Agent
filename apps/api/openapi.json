@@ -325,6 +325,45 @@
           }
         }
       }
+    },
+    "/v1/catalog/validate": {
+      "post": {
+        "summary": "Validate external catalog variant descriptor, immutable revision, strong ETag, and HTTPS source",
+        "responses": {
+          "200": {
+            "description": "Catalog variant valid"
+          },
+          "400": {
+            "description": "Malformed descriptor, redirect hop limit exceeded, or unsafe format"
+          }
+        }
+      }
+    },
+    "/v1/context-budget": {
+      "post": {
+        "summary": "Deterministic context-window token budget allocation with excerpt rank preservation",
+        "responses": {
+          "200": {
+            "description": "ContextBudgetAllocation receipt"
+          },
+          "400": {
+            "description": "User request + overhead exceeds context window (BudgetExhausted)"
+          }
+        }
+      }
+    },
+    "/v1/broker/validate": {
+      "post": {
+        "summary": "Validate and consume single-use challenge-bound privileged broker permit with replay defense",
+        "responses": {
+          "200": {
+            "description": "Broker status: completed"
+          },
+          "400": {
+            "description": "Permit expired, replay nonce detected, digest mismatch, or unallowlisted service"
+          }
+        }
+      }
     }
   }
 }

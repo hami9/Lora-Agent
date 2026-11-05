@@ -31,6 +31,9 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(openapi_str.contains("\"/v1/patch/preview\""));
     assert!(openapi_str.contains("\"/v1/patch/apply\""));
     assert!(openapi_str.contains("\"/v1/patch/rollback\""));
+    assert!(openapi_str.contains("\"/v1/catalog/validate\""));
+    assert!(openapi_str.contains("\"/v1/context-budget\""));
+    assert!(openapi_str.contains("\"/v1/broker/validate\""));
 
     // 2. Spawn live `lora-api --once` on loopback port and send authenticated GET /v1/capabilities
     let bind_addr = find_free_loopback_addr();
@@ -69,6 +72,9 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(resp.starts_with("HTTP/1.1 200 OK"));
     assert!(resp.contains("\"api_major\":1"));
     assert!(resp.contains("\"runs.events.sse\""));
+    assert!(resp.contains("\"catalog.validate\""));
+    assert!(resp.contains("\"context_budget.evaluate\""));
+    assert!(resp.contains("\"broker.validate\""));
 
     // 3. Import a synthetic GGUF fixture into the store so we can test live execution over TCP
     {
@@ -130,7 +136,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "37",
+            "43",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -621,6 +627,128 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r37.starts_with("HTTP/1.1 200 OK"));
     assert!(r37.contains("\"status\":\"verified\""));
     assert!(r37.contains("\"permit_id\":\"permit-live-01\""));
+
+    // (ai) POST /v1/catalog/validate checks GGUF format, immutable revision, strong ETag, and HTTPS
+    let body_cat_valid = serde_json::json!({
+        "descriptor": {
+            "model_id": "meta-llama/Llama-3-8B-Instruct",
+            "immutable_revision": "e1245ff72d00f682cb304a9d70104191db48d5d4",
+            "filename": "llama-3-8b.gguf",
+            "size_bytes": 4800000000_u64,
+            "license": "Llama-3-Community",
+            "expected_sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "strong_etag": "\"5f8a-5b12\"",
+            "download_url": "https://huggingface.co/models/llama-3-8b.gguf"
+        },
+        "redirect_hops": 1
+    })
+    .to_string();
+    let r38 = send_http(&format!(
+        "POST /v1/catalog/validate HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_cat_valid}",
+        body_cat_valid.len()
+    ));
+    assert!(r38.starts_with("HTTP/1.1 200 OK"));
+    assert!(r38.contains("\"status\":\"valid\""));
+    assert!(r38.contains("\"filename\":\"llama-3-8b.gguf\""));
+
+    // (aj) POST /v1/catalog/validate rejects unsafe script/pickle extensions
+    let body_cat_bad = serde_json::json!({
+        "descriptor": {
+            "model_id": "meta-llama/Llama-3-8B-Instruct",
+            "immutable_revision": "e1245ff72d00f682cb304a9d70104191db48d5d4",
+            "filename": "malicious_loader.py",
+            "size_bytes": 1024,
+            "license": "Apache-2.0",
+            "expected_sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "strong_etag": "\"5f8a\"",
+            "download_url": "https://huggingface.co/models/malicious_loader.py"
+        }
+    })
+    .to_string();
+    let r39 = send_http(&format!(
+        "POST /v1/catalog/validate HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_cat_bad}",
+        body_cat_bad.len()
+    ));
+    assert!(r39.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(r39.contains("policy_denied"));
+
+    // (ak) POST /v1/context-budget computes deterministic token allocation
+    let body_ctx_valid = serde_json::json!({
+        "context_window_tokens": 2048,
+        "reserved_output_tokens": 512,
+        "control_schema_overhead_tokens": 128,
+        "user_request_tokens": 256,
+        "recent_turns_tokens": 128,
+        "tool_receipts_tokens": 64,
+        "ranked_excerpts": []
+    })
+    .to_string();
+    let r40 = send_http(&format!(
+        "POST /v1/context-budget HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_ctx_valid}",
+        body_ctx_valid.len()
+    ));
+    assert!(r40.starts_with("HTTP/1.1 200 OK"));
+    assert!(r40.contains("\"total_allocated_tokens\":1088"));
+    assert!(r40.contains("\"remaining_headroom_tokens\":960"));
+
+    // (al) POST /v1/context-budget fails closed when user request exceeds budget
+    let body_ctx_overflow = serde_json::json!({
+        "context_window_tokens": 512,
+        "reserved_output_tokens": 256,
+        "control_schema_overhead_tokens": 128,
+        "user_request_tokens": 256,
+        "recent_turns_tokens": 0,
+        "tool_receipts_tokens": 0,
+        "ranked_excerpts": []
+    })
+    .to_string();
+    let r41 = send_http(&format!(
+        "POST /v1/context-budget HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_ctx_overflow}",
+        body_ctx_overflow.len()
+    ));
+    assert!(r41.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(r41.contains("budget_exhausted"));
+
+    // (am) POST /v1/broker/validate verifies single-use challenge-bound permit
+    let broker_verb = serde_json::json!({
+        "restart_allowlisted_service": {
+            "service_name": "lora-local-service"
+        }
+    });
+    let now = lora_core::now_epoch_ms();
+    let nonce = "challenge-nonce-tcp-01";
+    let sess = "sess-tcp-01";
+    let permit_verb: lora_core::BrokerVerb = serde_json::from_value(broker_verb.clone()).unwrap();
+    let digest =
+        lora_core::BrokerSingleUsePermit::compute_request_digest(sess, nonce, &permit_verb);
+    let body_broker = serde_json::json!({
+        "permit": {
+            "permit_id": "permit-broker-01",
+            "session_id": sess,
+            "challenge_nonce": nonce,
+            "verb": broker_verb,
+            "request_digest": digest,
+            "expires_at_ms": now + 60_000
+        },
+        "allowlisted_services": ["lora-local-service"]
+    })
+    .to_string();
+    let r42 = send_http(&format!(
+        "POST /v1/broker/validate HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_broker}",
+        body_broker.len()
+    ));
+    assert!(r42.starts_with("HTTP/1.1 200 OK"));
+    assert!(r42.contains("\"status\":\"completed\""));
+    assert!(r42.contains("\"valid\":true"));
+
+    // (an) POST /v1/broker/validate rejects replay of consumed nonce
+    let r43 = send_http(&format!(
+        "POST /v1/broker/validate HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_broker}",
+        body_broker.len()
+    ));
+    assert!(r43.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(r43.contains("policy_denied"));
+    assert!(r43.contains("replay detected"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());

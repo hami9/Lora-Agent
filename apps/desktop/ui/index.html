@@ -203,6 +203,11 @@
         <div class="card">
           <p>Scoped Read-only Assistant and Supervised Patch previews. Interrupted effects remain visibly unconfirmed.</p>
         </div>
+        <div class="card" id="context-budget-live" hidden>
+          <h2>Context Window Token Allocation</h2>
+          <p><strong>Window:</strong> <span id="budget-window">2048</span> tokens | <strong>Reserved Output:</strong> <span id="budget-output">512</span> tokens</p>
+          <p><strong>Allocated:</strong> <span id="budget-allocated">1088</span> tokens | <strong>Remaining Headroom:</strong> <span id="budget-headroom">960</span> tokens</p>
+        </div>
       </section>
 
       <section id="screen-model-library" class="screen" aria-labelledby="h-models">
@@ -261,6 +266,10 @@
             <thead><tr><th scope="col">Seq</th><th scope="col">Run</th><th scope="col">Actor</th><th scope="col">Decision</th><th scope="col">Summary</th></tr></thead>
             <tbody id="audit-tbody"></tbody>
           </table>
+        </div>
+        <div class="card" id="broker-status-card">
+          <h2>Privileged Broker Security Gate</h2>
+          <p><strong>Status:</strong> <span id="broker-status">Active</span> | <strong>Replay Defense:</strong> Enforced</p>
         </div>
       </section>
     </main>
@@ -379,8 +388,24 @@
       }
       document.getElementById('audit-live').hidden = events.length === 0;
     };
+    const loadBudget = async () => {
+      const b = await getJson('/api/context-budget');
+      if (b && b.context_window_tokens) {
+        document.getElementById('budget-window').textContent = b.context_window_tokens;
+        document.getElementById('budget-output').textContent = b.reserved_output_tokens;
+        document.getElementById('budget-allocated').textContent = b.total_allocated_tokens;
+        document.getElementById('budget-headroom').textContent = b.remaining_headroom_tokens;
+        document.getElementById('context-budget-live').hidden = false;
+      }
+    };
+    const loadBroker = async () => {
+      const s = await getJson('/api/broker-status');
+      if (s && s.status) {
+        document.getElementById('broker-status').textContent = s.status;
+      }
+    };
     if (location.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)) {
-      Promise.allSettled([loadDashboard(), loadModels(), loadPlugins(), loadTuning(), loadAudit()]).then((results) => {
+      Promise.allSettled([loadDashboard(), loadModels(), loadPlugins(), loadTuning(), loadAudit(), loadBudget(), loadBroker()]).then((results) => {
         const failed = results.filter((r) => r.status === 'rejected').length;
         announce(failed ? 'Live runtime data partially unavailable.' : 'Live runtime data loaded.');
       });

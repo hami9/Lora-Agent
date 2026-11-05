@@ -70,6 +70,10 @@ impl PrivilegedBrokerGate {
         }
     }
 
+    pub fn allow_service(&mut self, service: impl Into<String>) {
+        self.allowlisted_services.insert(service.into());
+    }
+
     pub fn validate_and_consume_permit(
         &mut self,
         permit: &BrokerSingleUsePermit,

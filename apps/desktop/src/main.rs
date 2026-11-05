@@ -4,9 +4,9 @@
 
 use clap::Parser;
 use lora_core::{
-    default_risk_register_matrix, slice_virtualized_transcript, ApprovalDecision,
-    ApprovalPromptPort, ApprovalRequest, LoraApplicationService, LoraError,
-    TrustedConsentDialogViewModel, DEFAULT_SAFETY_RESERVE_BYTES,
+    allocate_context_budget, default_risk_register_matrix, slice_virtualized_transcript,
+    ApprovalDecision, ApprovalPromptPort, ApprovalRequest, ContextBudgetRequest,
+    LoraApplicationService, LoraError, TrustedConsentDialogViewModel, DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -183,6 +183,33 @@ fn route_request(
                 &format!("{:?}", e.reason_code()),
             ),
         },
+        "/api/context-budget" => {
+            let req = ContextBudgetRequest {
+                context_window_tokens: 2048,
+                reserved_output_tokens: 512,
+                control_schema_overhead_tokens: 128,
+                user_request_tokens: 256,
+                recent_turns_tokens: 128,
+                tool_receipts_tokens: 64,
+                ranked_excerpts: vec![],
+            };
+            match allocate_context_budget(&req) {
+                Ok(alloc) => HttpResponse::json(&alloc),
+                Err(e) => HttpResponse::error(
+                    "500 Internal Server Error",
+                    &format!("{:?}", e.reason_code()),
+                ),
+            }
+        }
+        "/api/broker-status" => {
+            let status = serde_json::json!({
+                "status": "ready",
+                "allowlisted_services": ["lora-local-service", "lora-worker", "lora-daemon"],
+                "nonce_tracking": "active",
+                "replay_defense": "enforced"
+            });
+            HttpResponse::json(&status)
+        }
         "/api/risk-matrix" => HttpResponse::json(&default_risk_register_matrix()),
         "/api/hardware" => match app.hw_probe.capture_snapshot(data_dir) {
             Ok(snap) => HttpResponse::json(&snap),

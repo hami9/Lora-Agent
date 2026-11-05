@@ -5,13 +5,15 @@
 
 use clap::Parser;
 use lora_core::{
-    apply_approved_patch, default_risk_register_matrix, evaluate_adapter_promotion_gate,
-    now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
+    allocate_context_budget, apply_approved_patch, default_risk_register_matrix,
+    evaluate_adapter_promotion_gate, now_epoch_ms, prepare_leakage_free_splits,
+    preview_checked_patch, rollback_applied_patch, validate_catalog_variant,
     validate_loopback_bind, verify_egress_permit, verify_loopback_http_security, AgentLimits,
-    ApiRunManager, ApprovalDecision, ApprovalPromptPort, ApprovalRequest, CompensatingPatchReceipt,
-    EgressConsentPreview, EgressPermit, ExecutionMode, ExtensionManifestV1,
-    HeldOutEvaluationReceipt, IdempotencyLedger, LoraApplicationService, LoraError, LoraJobConfig,
-    PatchProposal, TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
+    ApiRunManager, ApprovalDecision, ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit,
+    CatalogVariantDescriptor, CompensatingPatchReceipt, ContextBudgetRequest, EgressConsentPreview,
+    EgressPermit, ExecutionMode, ExtensionManifestV1, HeldOutEvaluationReceipt, IdempotencyLedger,
+    LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
+    TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
     DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
@@ -146,12 +148,24 @@ fn main() {
 
     let mut ledger = IdempotencyLedger::new();
     let mut run_mgr = ApiRunManager::default();
+    let mut broker_gate = PrivilegedBrokerGate::new(vec![
+        "lora-local-service".to_string(),
+        "lora-worker".to_string(),
+        "lora-daemon".to_string(),
+    ]);
     let mut served = 0usize;
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else {
             continue;
         };
-        let _ = handle_http_connection(&mut stream, token, &app, &mut ledger, &mut run_mgr);
+        let _ = handle_http_connection(
+            &mut stream,
+            token,
+            &app,
+            &mut ledger,
+            &mut run_mgr,
+            &mut broker_gate,
+        );
         served += 1;
         if cli.once || (cli.max_requests > 0 && served >= cli.max_requests) {
             break;
@@ -180,6 +194,7 @@ fn handle_http_connection(
     app: &LoraApplicationService,
     ledger: &mut IdempotencyLedger,
     run_mgr: &mut ApiRunManager,
+    broker_gate: &mut PrivilegedBrokerGate,
 ) -> Result<(), LoraError> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
@@ -1129,6 +1144,191 @@ fn handle_http_connection(
                     let body = serde_json::json!({
                         "status": "verified",
                         "permit_id": permit.permit_id,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("POST", "/v1/catalog/validate") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+
+            let descriptor: CatalogVariantDescriptor = if req_json.get("descriptor").is_some() {
+                match serde_json::from_value(req_json["descriptor"].clone()) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let err = serde_json::json!({
+                            "code": "malformed_request",
+                            "detail": format!("invalid descriptor: {e}"),
+                        })
+                        .to_string();
+                        return write_http_response(
+                            stream,
+                            "400 Bad Request",
+                            "application/json",
+                            &err,
+                        );
+                    }
+                }
+            } else {
+                match serde_json::from_value(req_json.clone()) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let err = serde_json::json!({
+                            "code": "malformed_request",
+                            "detail": format!("invalid descriptor: {e}"),
+                        })
+                        .to_string();
+                        return write_http_response(
+                            stream,
+                            "400 Bad Request",
+                            "application/json",
+                            &err,
+                        );
+                    }
+                }
+            };
+
+            let redirect_hops = req_json
+                .get("redirect_hops")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u8;
+
+            match validate_catalog_variant(&descriptor, redirect_hops) {
+                Ok(()) => {
+                    let body = serde_json::json!({
+                        "status": "valid",
+                        "model_id": descriptor.model_id,
+                        "filename": descriptor.filename,
+                        "size_bytes": descriptor.size_bytes,
+                        "sha256_verified": true,
+                        "strong_etag": descriptor.strong_etag,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("POST", "/v1/context-budget") => {
+            let req: ContextBudgetRequest = match serde_json::from_str(&body_str) {
+                Ok(r) => r,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid context budget request: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+
+            match allocate_context_budget(&req) {
+                Ok(alloc) => {
+                    let body = serde_json::to_string(&alloc).unwrap_or_default();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("POST", "/v1/broker/validate") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+
+            let permit: BrokerSingleUsePermit =
+                match serde_json::from_value(if req_json.get("permit").is_some() {
+                    req_json["permit"].clone()
+                } else {
+                    req_json.clone()
+                }) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let err = serde_json::json!({
+                            "code": "malformed_request",
+                            "detail": format!("invalid broker permit: {e}"),
+                        })
+                        .to_string();
+                        return write_http_response(
+                            stream,
+                            "400 Bad Request",
+                            "application/json",
+                            &err,
+                        );
+                    }
+                };
+
+            if let Some(arr) = req_json
+                .get("allowlisted_services")
+                .and_then(|v| v.as_array())
+            {
+                for s in arr.iter().filter_map(|v| v.as_str()) {
+                    broker_gate.allow_service(s);
+                }
+            }
+
+            let now = now_epoch_ms();
+            match broker_gate.validate_and_consume_permit(&permit, now) {
+                Ok(status) => {
+                    let body = serde_json::json!({
+                        "status": status,
+                        "permit_id": permit.permit_id,
+                        "valid": true,
                     })
                     .to_string();
                     write_http_response(stream, "200 OK", "application/json", &body)

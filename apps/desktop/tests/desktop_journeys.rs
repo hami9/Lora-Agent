@@ -60,6 +60,8 @@ fn desktop_shell_view_model_csp_and_capabilities_e2e() {
     }
     assert!(html.contains("id=\"consent-deny-btn\" autofocus"));
     assert!(html.contains("NC-EDGERUNNER-02::CAPRI"));
+    assert!(html.contains("context-budget-live"));
+    assert!(html.contains("broker-status-card"));
 
     // 4. Verify Tauri v2 capability manifest disallows remote URLs and shell/fs ambient plugins
     let cap_raw = include_str!("../capabilities/main-window.json");
@@ -149,7 +151,7 @@ fn desktop_loopback_bridge_serves_ui_and_view_models() {
             "--serve",
             "127.0.0.1:0",
             "--max-requests",
-            "11",
+            "13",
         ])
         .stdout(Stdio::piped())
         .spawn()
@@ -226,14 +228,26 @@ fn desktop_loopback_bridge_serves_ui_and_view_models() {
     assert!(head.starts_with("HTTP/1.1 200"));
     assert!(body.starts_with('['));
 
-    // 10. DNS-rebinding defense: foreign Host header is rejected
+    // 10. Context budget deterministic allocation endpoint
+    let (head, body) = get("/api/context-budget");
+    assert!(head.starts_with("HTTP/1.1 200"));
+    assert!(body.contains("\"context_window_tokens\": 2048"));
+    assert!(body.contains("\"reserved_output_tokens\": 512"));
+
+    // 11. Privileged broker status endpoint
+    let (head, body) = get("/api/broker-status");
+    assert!(head.starts_with("HTTP/1.1 200"));
+    assert!(body.contains("\"status\": \"ready\""));
+    assert!(body.contains("\"replay_defense\": \"enforced\""));
+
+    // 12. DNS-rebinding defense: foreign Host header is rejected
     let (head, _) = http_request(
         &addr,
         "GET /api/dashboard HTTP/1.1\r\nHost: evil.example:80\r\nConnection: close\r\n\r\n",
     );
     assert!(head.starts_with("HTTP/1.1 403"));
 
-    // 11. Read-only bridge: non-GET methods are rejected
+    // 13. Read-only bridge: non-GET methods are rejected
     let (head, _) = http_request(
         &addr,
         &format!("POST /api/dashboard HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\n\r\n"),

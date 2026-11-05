@@ -1999,3 +1999,70 @@ fn cli_audit_journal_export_prune_and_filter() {
     let stdout_prune = String::from_utf8_lossy(&out_prune.stdout);
     assert!(stdout_prune.contains("Pruned"));
 }
+
+#[test]
+fn cli_catalog_context_budget_and_broker_execution() {
+    use std::fs;
+    use std::process::Command;
+    let cli_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().expect("tempdir");
+
+    let run = |args: &[&str]| {
+        Command::new(cli_bin)
+            .env("LORA_DATA_DIR", tmp.path())
+            .args(args)
+            .output()
+            .expect("run lora CLI")
+    };
+
+    // 1. Catalog variant verification via CLI
+    let valid_desc = serde_json::json!({
+        "model_id": "org/test-model",
+        "immutable_revision": "fedcba9876543210fedcba9876543210fedcba98",
+        "filename": "model-q4_k_m.gguf",
+        "size_bytes": 1048576,
+        "license": "Apache-2.0",
+        "expected_sha256": "a".repeat(64),
+        "strong_etag": "\"etag-12345\"",
+        "download_url": "https://cdn.example.com/models/model-q4_k_m.gguf"
+    });
+    let desc_path = tmp.path().join("catalog-desc.json");
+    fs::write(&desc_path, valid_desc.to_string()).unwrap();
+
+    let out_cat = run(&["catalog", "--descriptor", desc_path.to_str().unwrap()]);
+    assert!(out_cat.status.success());
+    let stdout_cat = String::from_utf8_lossy(&out_cat.stdout);
+    assert!(stdout_cat.contains("Catalog variant verified"));
+    assert!(stdout_cat.contains("model-q4_k_m.gguf"));
+
+    // 2. Context budget evaluation via CLI
+    let out_budget = run(&[
+        "context-budget",
+        "--window",
+        "2048",
+        "--output",
+        "512",
+        "--user",
+        "256",
+    ]);
+    assert!(out_budget.status.success());
+    let stdout_budget = String::from_utf8_lossy(&out_budget.stdout);
+    assert!(stdout_budget.contains("Context window     : 2048 tokens"));
+    assert!(stdout_budget.contains("Reserved output    : 512 tokens"));
+    assert!(stdout_budget.contains("User request       : 256 tokens"));
+
+    // 3. Privileged broker permit validation via CLI
+    let out_broker = run(&[
+        "broker",
+        "--service",
+        "lora-local-service",
+        "--session",
+        "test-session-1",
+        "--nonce",
+        "nonce-test-123",
+    ]);
+    assert!(out_broker.status.success());
+    let stdout_broker = String::from_utf8_lossy(&out_broker.stdout);
+    assert!(stdout_broker.contains("Broker service : lora-local-service"));
+    assert!(stdout_broker.contains("Status         : Completed"));
+}
