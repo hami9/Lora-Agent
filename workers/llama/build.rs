@@ -14,6 +14,7 @@ fn main() {
     println!("cargo:rerun-if-changed=native/lora_llama_shim.cpp");
     println!("cargo:rerun-if-changed=native/lora_llama_shim.h");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_NATIVE_LLAMA_CPP");
+    println!("cargo:rerun-if-env-changed=LORA_LLAMA_CPP_DIR");
 
     if env::var_os("CARGO_FEATURE_NATIVE_LLAMA_CPP").is_none() {
         return;
@@ -46,7 +47,9 @@ fn check_revision(llama_dir: &Path) {
 
 fn build_native() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let llama_dir = manifest.join("vendor").join("llama.cpp");
+    let llama_dir = env::var_os("LORA_LLAMA_CPP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest.join("vendor").join("llama.cpp"));
     if !llama_dir.join("CMakeLists.txt").is_file() || !llama_dir.join("include/llama.h").is_file() {
         panic!(
             "llama.cpp submodule is missing at {}.\n\

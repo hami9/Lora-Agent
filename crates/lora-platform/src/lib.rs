@@ -23,11 +23,54 @@ use lora_protocol::{
     parse_gguf_file, sha256_file, GenerationUsage, ProbedModelMetadata, WorkerCapabilities,
     PINNED_LLAMA_CPP_REVISION,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+
+/// Resolve the worker spawner for CLI, API, and Desktop composition roots:
+/// 1. Explicit `--worker-bin` / `LORA_WORKER_BIN` if provided,
+/// 2. Sibling `lora-llama-worker` binary next to current executable (or parent target dir in tests),
+/// 3. Fallback `InProcessWorkerSpawner` when no standalone worker binary is present.
+pub fn resolve_default_worker_spawner(
+    explicit_bin: Option<PathBuf>,
+    backend_override: Option<&str>,
+) -> Arc<dyn WorkerSpawnerPort> {
+    let apply_backend = |mut spawner: SubprocessWorkerSpawner| {
+        if let Some(b) = backend_override.map(str::trim).filter(|s| !s.is_empty()) {
+            spawner = spawner.with_env("LORA_WORKER_BACKEND", b);
+        }
+        Arc::new(spawner) as Arc<dyn WorkerSpawnerPort>
+    };
+
+    if let Some(bin) = explicit_bin {
+        return apply_backend(SubprocessWorkerSpawner::new(bin));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let bin_name = if cfg!(windows) {
+            "lora-llama-worker.exe"
+        } else {
+            "lora-llama-worker"
+        };
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join(bin_name);
+            if sibling.is_file() {
+                return apply_backend(SubprocessWorkerSpawner::new(sibling));
+            }
+            if let Some(parent_dir) = dir.parent() {
+                let parent_candidate = parent_dir.join(bin_name);
+                if parent_candidate.is_file() {
+                    return apply_backend(SubprocessWorkerSpawner::new(parent_candidate));
+                }
+            }
+        }
+    }
+    Arc::new(InProcessWorkerSpawner {
+        fault: WorkerFaultInjection::None,
+        per_token_delay_ms: 0,
+    })
+}
 
 /// Fault injection modes for testing worker failure handling (`T4`, `M4`, `M7`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

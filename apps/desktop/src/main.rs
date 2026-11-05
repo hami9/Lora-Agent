@@ -8,7 +8,7 @@ use lora_core::{
     LoraApplicationService, LoraError, TrustedConsentDialogViewModel, DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
-    InProcessWorkerSpawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
+    resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,6 +23,14 @@ struct DesktopCli {
     /// Per-user data directory
     #[arg(long, env = "LORA_DATA_DIR")]
     data_dir: Option<PathBuf>,
+
+    /// Path to isolated `lora-llama-worker` binary (defaults to sibling executable or in-process shim)
+    #[arg(long, env = "LORA_WORKER_BIN")]
+    worker_bin: Option<PathBuf>,
+
+    /// Worker backend selection (`native` or `deterministic`)
+    #[arg(long, env = "LORA_WORKER_BACKEND")]
+    worker_backend: Option<String>,
 
     /// Enable experimental screens in the status strip
     #[arg(long)]
@@ -64,7 +72,8 @@ fn main() {
     let lock_port = OsStoreLockPort;
     let hw_probe = Arc::new(SysinfoHardwareProbe);
     let file_executor = Arc::new(OsScopedFileExecutor);
-    let worker_spawner = Arc::new(InProcessWorkerSpawner::default());
+    let worker_spawner =
+        resolve_default_worker_spawner(cli.worker_bin, cli.worker_backend.as_deref());
     let approval_ui = Arc::new(DenyByDefaultDesktopPrompt);
 
     let app = match LoraApplicationService::open(

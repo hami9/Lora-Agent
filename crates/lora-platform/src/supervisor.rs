@@ -153,6 +153,19 @@ impl WorkerSpawnerPort for SubprocessWorkerSpawner {
                 cmd.env(safe_var, val);
             }
         }
+        // Forward validated worker backend / log toggles across the scrubbed environment boundary
+        if let Ok(backend) = std::env::var("LORA_WORKER_BACKEND") {
+            let trimmed = backend.trim().to_ascii_lowercase();
+            if matches!(trimmed.as_str(), "native" | "deterministic") {
+                cmd.env("LORA_WORKER_BACKEND", trimmed);
+            }
+        }
+        if let Ok(log_flag) = std::env::var("LORA_WORKER_LLAMA_LOG") {
+            let trimmed = log_flag.trim();
+            if matches!(trimmed, "0" | "1") {
+                cmd.env("LORA_WORKER_LLAMA_LOG", trimmed);
+            }
+        }
         for (k, v) in &self.extra_env {
             cmd.env(k, v);
         }

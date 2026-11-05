@@ -247,12 +247,6 @@ fn process_rss_bytes() -> u64 {
     sys.process(pid).map_or(0, |p| p.memory())
 }
 
-const TOOL_SYSTEM_PROMPT: &str = "You are a careful local assistant. You may call exactly one tool \
-when it is needed to answer. The only tool is read_file, which reads a text file from a workspace \
-root. To call it, reply with only this text and nothing else: \
-<tool_call>{\"name\":\"read_file\",\"arguments\":{\"root_id\":\"...\",\"relative_path\":\"...\"}}</tool_call> \
-Use the WorkspaceRootId given in the request for root_id. If no tool is needed, answer normally.";
-
 pub struct NativeBackend {
     model: Option<(String, u32, NativeModel)>,
     cancel: Arc<CancelState>,
@@ -380,7 +374,7 @@ impl NativeBackend {
             );
         }
 
-        let system = g.tool_calling_enabled.then_some(TOOL_SYSTEM_PROMPT);
+        let system = crate::toolcall::select_tool_system_prompt(g.tool_calling_enabled, &g.prompt);
         let formatted = match model.apply_template(system, &g.prompt) {
             Ok(s) => s,
             Err(e) => return err(writer, WorkerErrorCode::InternalError, e),

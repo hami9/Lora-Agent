@@ -510,7 +510,23 @@ pub fn parse_gguf_reader<R: Read>(reader: R, file_size: u64) -> Result<ParsedGgu
         return Err(GgufError::UnsupportedModality);
     }
 
-    if !matches!(architecture.as_str(), "llama" | "qwen2" | "mistral") {
+    if !matches!(
+        architecture.as_str(),
+        "llama"
+            | "qwen2"
+            | "qwen3"
+            | "mistral"
+            | "gemma"
+            | "gemma2"
+            | "gemma3"
+            | "phi2"
+            | "phi3"
+            | "deepseek2"
+            | "command-r"
+            | "starcoder2"
+            | "internlm2"
+            | "granite"
+    ) {
         return Err(GgufError::UnsupportedArchitecture(architecture));
     }
 
@@ -557,7 +573,12 @@ pub fn parse_gguf_reader<R: Read>(reader: R, file_size: u64) -> Result<ParsedGgu
     let supports_tool_calling = kv
         .get("lora.supports_tools")
         .and_then(GgufValue::as_bool)
-        .unwrap_or_else(|| chat_template.contains("tool") || chat_template.contains("read_file"));
+        .unwrap_or_else(|| {
+            chat_template.contains("tool")
+                || chat_template.contains("read_file")
+                || chat_template.contains("messages")
+                || chat_template.contains("content")
+        });
 
     // Tensor info entries: name, n_dims (u32), dims (u64 * n_dims), ggml_type (u32), offset (u64).
     let mut tensor_entries = Vec::with_capacity(tensor_count.min(4096) as usize);
@@ -1017,6 +1038,29 @@ mod tests {
         assert_eq!(parse(&bytes).unwrap().metadata.quantization, "Q4_K_M");
         let bytes = Builder::base().build();
         assert_eq!(parse(&bytes).unwrap().metadata.quantization, "unknown");
+    }
+
+    #[test]
+    fn extended_architectures_and_tool_calling_inference() {
+        for arch in ["gemma2", "phi3", "qwen3", "deepseek2"] {
+            let bytes = Builder::new()
+                .string("general.architecture", arch)
+                .string(
+                    "tokenizer.chat_template",
+                    "{% for m in messages %}{{ m.content }}{% endfor %}",
+                )
+                .build();
+            let parsed = parse(&bytes).expect("extended text architecture must parse");
+            assert_eq!(parsed.metadata.architecture, arch);
+            assert!(parsed.metadata.supports_tool_calling);
+        }
+
+        // Explicit lora.supports_tools = false overrides template inference
+        let disabled = build_synthetic_gguf(&SyntheticGgufSpec {
+            supports_tools: false,
+            ..SyntheticGgufSpec::default()
+        });
+        assert!(!parse(&disabled).unwrap().metadata.supports_tool_calling);
     }
 
     #[test]

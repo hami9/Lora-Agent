@@ -6,16 +6,17 @@
 use clap::Parser;
 use lora_core::{
     default_risk_register_matrix, now_epoch_ms, validate_loopback_bind,
-    verify_loopback_http_security, ApiRunManager, ApprovalDecision, ApprovalPromptPort,
-    ApprovalRequest, IdempotencyLedger, LoraApplicationService, LoraError,
-    DEFAULT_SAFETY_RESERVE_BYTES,
+    verify_loopback_http_security, AgentLimits, ApiRunManager, ApprovalDecision,
+    ApprovalPromptPort, ApprovalRequest, ExecutionMode, IdempotencyLedger, LoraApplicationService,
+    LoraError, TuningProfile, DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
-    InProcessWorkerSpawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
+    resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
 };
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 #[derive(Debug, Parser)]
@@ -28,6 +29,14 @@ struct ApiCli {
     /// Per-user data directory
     #[arg(long, env = "LORA_DATA_DIR")]
     data_dir: Option<PathBuf>,
+
+    /// Path to isolated `lora-llama-worker` binary (defaults to sibling executable or in-process shim)
+    #[arg(long, env = "LORA_WORKER_BIN")]
+    worker_bin: Option<PathBuf>,
+
+    /// Worker backend selection (`native` or `deterministic`)
+    #[arg(long, env = "LORA_WORKER_BACKEND")]
+    worker_backend: Option<String>,
 
     /// Numeric loopback socket address (`127.0.0.1:8421` or `[::1]:8421`)
     #[arg(long, default_value = "127.0.0.1:8421")]
@@ -90,7 +99,8 @@ fn main() {
     let lock_port = OsStoreLockPort;
     let hw_probe = Arc::new(SysinfoHardwareProbe);
     let file_executor = Arc::new(OsScopedFileExecutor);
-    let worker_spawner = Arc::new(InProcessWorkerSpawner::default());
+    let worker_spawner =
+        resolve_default_worker_spawner(cli.worker_bin, cli.worker_backend.as_deref());
     let approval_ui = Arc::new(DenyByDefaultApiPrompt);
 
     let app = match LoraApplicationService::open(
@@ -273,6 +283,78 @@ fn handle_http_connection(
                     "run_started",
                     r#"{"status":"running"}"#,
                 );
+
+                if let Ok(req_json) = serde_json::from_str::<serde_json::Value>(&body_str) {
+                    let execute = req_json
+                        .get("execute")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if execute {
+                        let model = req_json
+                            .get("model")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("default");
+                        let prompt = req_json
+                            .get("prompt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Hello");
+                        let context = req_json
+                            .get("context")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(2048) as u32;
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        let mut deltas = Vec::new();
+                        match app.run_task(
+                            &resolved_run_id,
+                            principal,
+                            model,
+                            context,
+                            TuningProfile::Automatic,
+                            ExecutionMode::ChatOnly,
+                            None,
+                            prompt,
+                            &AgentLimits::default(),
+                            &cancel,
+                            &mut |delta| {
+                                deltas.push(delta.to_string());
+                                Ok(())
+                            },
+                        ) {
+                            Ok((_plan, outcome)) => {
+                                for chunk in deltas {
+                                    let ev_data =
+                                        serde_json::json!({ "text_delta": chunk }).to_string();
+                                    let _ = run_mgr.append_event(
+                                        &resolved_run_id,
+                                        "token_delta",
+                                        &ev_data,
+                                    );
+                                }
+                                let done_data = serde_json::json!({
+                                    "status": "succeeded",
+                                    "answer": outcome.answer,
+                                    "turns_used": outcome.turns_used,
+                                })
+                                .to_string();
+                                let _ = run_mgr.append_event(
+                                    &resolved_run_id,
+                                    "run_completed",
+                                    &done_data,
+                                );
+                            }
+                            Err(err) => {
+                                let err_data = serde_json::json!({
+                                    "status": "failed",
+                                    "code": err.reason_code(),
+                                    "detail": err.redacted_message(),
+                                })
+                                .to_string();
+                                let _ =
+                                    run_mgr.append_event(&resolved_run_id, "run_failed", &err_data);
+                            }
+                        }
+                    }
+                }
             }
 
             let body = serde_json::json!({

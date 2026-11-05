@@ -26,7 +26,7 @@
 ## Workspace Architecture
 
 ```text
-├── Cargo.toml                  # Workspace root (version = "0.1.0")
+├── Cargo.toml                  # Workspace root (version = "0.1.1")
 ├── crates/
 │   ├── lora-protocol/          # v1 32-bit BE JSON framing, closed schemas & streaming GGUF v2/v3 parser
 │   ├── lora-core/              # App service, SQLite store, registry, HIE, policy gate & RAG
@@ -92,7 +92,8 @@ python -B scripts/docs.py check
 The primary binary is `lora` located at `target/debug/lora` (or `target/release/lora`):
 
 ```sh
-# 1. Inspect hardware sensors and runtime health
+# 1. Display terminal ASCII banner, hardware sensors, and runtime health
+lora banner
 lora inspect
 
 # 2. View active risk mitigation matrix (R01 through R18)

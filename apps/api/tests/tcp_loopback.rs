@@ -65,7 +65,46 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(resp.contains("\"api_major\":1"));
     assert!(resp.contains("\"runs.events.sse\""));
 
-    // 3. Multi-request live TCP session: POST /v1/runs (idempotency + 409 conflict), GET /v1/runs/{id}/events, POST /v1/runs/{id}/cancel, and 403 DNS-rebinding rejection
+    // 3. Import a synthetic GGUF fixture into the store so we can test live execution over TCP
+    {
+        use lora_core::{
+            ApprovalDecision, ApprovalPromptPort, ApprovalRequest, LoraApplicationService,
+            LoraError, DEFAULT_SAFETY_RESERVE_BYTES,
+        };
+        use lora_platform::{
+            InProcessWorkerSpawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
+        };
+        use lora_protocol::{build_synthetic_gguf, SyntheticGgufSpec};
+        use std::sync::Arc;
+
+        struct DenyPrompt;
+        impl ApprovalPromptPort for DenyPrompt {
+            fn prompt_user(&self, _req: &ApprovalRequest) -> Result<ApprovalDecision, LoraError> {
+                Ok(ApprovalDecision::Deny)
+            }
+        }
+
+        let fixture_path = tmp.path().join("api-fixture.gguf");
+        std::fs::write(
+            &fixture_path,
+            build_synthetic_gguf(&SyntheticGgufSpec::default()),
+        )
+        .unwrap();
+        let app = LoraApplicationService::open(
+            tmp.path(),
+            DEFAULT_SAFETY_RESERVE_BYTES,
+            &OsStoreLockPort,
+            Arc::new(SysinfoHardwareProbe),
+            Arc::new(OsScopedFileExecutor),
+            Arc::new(InProcessWorkerSpawner::default()),
+            Arc::new(DenyPrompt),
+        )
+        .unwrap();
+        app.import_model(&fixture_path, Some("api-model"), None)
+            .unwrap();
+    }
+
+    // 4. Multi-request live TCP session: POST /v1/runs (idempotency + 409 conflict + live execute), GET /v1/runs/{id}/events, POST /v1/runs/{id}/cancel, and 403 DNS-rebinding rejection
     let bind_addr2 = find_free_loopback_addr();
     let mut child2 = Command::new(api_bin)
         .args([
@@ -76,7 +115,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "8",
+            "10",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -159,6 +198,25 @@ fn loopback_api_live_tcp_socket_e2e() {
     ));
     assert!(r8.starts_with("HTTP/1.1 200 OK"));
     assert!(r8.contains("\"risk_id\":\"R18\""));
+
+    // (h) Execute a real chat run via POST /v1/runs with `"execute":true` and verify SSE token_delta + run_completed
+    let body_exec = r#"{"model":"api-model","prompt":"Hello from loopback API","execute":true}"#;
+    let r9 = send_http(&format!(
+        "POST /v1/runs HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nIdempotency-Key: idem-tcp-exec\r\nContent-Length: {}\r\n\r\n{body_exec}",
+        body_exec.len()
+    ));
+    assert!(r9.starts_with("HTTP/1.1 202 Accepted"));
+    let exec_json_str = r9.split("\r\n\r\n").nth(1).unwrap();
+    let exec_val: serde_json::Value = serde_json::from_str(exec_json_str).unwrap();
+    let exec_run_id = exec_val["run_id"].as_str().unwrap();
+
+    let r10 = send_http(&format!(
+        "GET /v1/runs/{exec_run_id}/events HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r10.starts_with("HTTP/1.1 200 OK"));
+    assert!(r10.contains("event: token_delta"));
+    assert!(r10.contains("event: run_completed"));
+    assert!(r10.contains("Offline local response"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());

@@ -10,11 +10,10 @@ use lora_core::{
     ContextBudgetRequest, ExecutionMode, ExtensionManifestV1, HardwareProbePort,
     HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig, PatchProposal,
     PrivilegedBrokerGate, SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey,
-    TuningProfile, TuningTrialSample, DEFAULT_SAFETY_RESERVE_BYTES,
+    TuningProfile, TuningTrialSample, DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
 };
 use lora_platform::{
-    InProcessWorkerSpawner, OsScopedFileExecutor, OsStoreLockPort, SubprocessWorkerSpawner,
-    SysinfoHardwareProbe, WorkerFaultInjection,
+    resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
 };
 use lora_protocol::{
     build_synthetic_gguf, SyntheticGgufSpec, PINNED_LLAMA_CPP_REVISION, SUPPORTED_PROTOCOL_MAJOR,
@@ -28,6 +27,7 @@ use std::sync::Arc;
 #[command(
     name = "lora",
     version,
+    before_help = TERMINAL_ASCII_BANNER,
     about = "Local-first Rust runtime for GGUF text models and scoped read-only file assistance"
 )]
 struct Cli {
@@ -38,6 +38,10 @@ struct Cli {
     /// Path to isolated `lora-llama-worker` binary (defaults to sibling executable or in-process shim)
     #[arg(long, env = "LORA_WORKER_BIN")]
     worker_bin: Option<PathBuf>,
+
+    /// Worker backend selection (`native` or `deterministic`)
+    #[arg(long, env = "LORA_WORKER_BACKEND")]
+    worker_backend: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -66,6 +70,10 @@ impl From<ProfileArg> for TuningProfile {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Print the Lora Agent terminal ASCII banner and version header
+    #[command(visible_aliases = ["splash"])]
+    Banner,
+
     /// Report build identifiers, worker pin, hardware snapshot, and startup reconciliation status
     #[command(visible_aliases = ["hardware", "doctor"])]
     Inspect {
@@ -416,30 +424,14 @@ fn default_data_dir() -> PathBuf {
     }
 }
 
-fn resolve_worker_spawner(explicit_bin: Option<PathBuf>) -> Arc<dyn lora_core::WorkerSpawnerPort> {
-    if let Some(bin) = explicit_bin {
-        return Arc::new(SubprocessWorkerSpawner::new(bin));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = if cfg!(windows) {
-                dir.join("lora-llama-worker.exe")
-            } else {
-                dir.join("lora-llama-worker")
-            };
-            if candidate.is_file() {
-                return Arc::new(SubprocessWorkerSpawner::new(candidate));
-            }
-        }
-    }
-    Arc::new(InProcessWorkerSpawner {
-        fault: WorkerFaultInjection::None,
-        per_token_delay_ms: 0,
-    })
-}
-
 fn main() {
     let cli = Cli::parse();
+
+    if matches!(&cli.command, Commands::Banner) {
+        println!("{TERMINAL_ASCII_BANNER}");
+        println!("Lora Agent CLI v{}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
 
     if let Commands::GenerateFixture { output } = &cli.command {
         if let Some(parent) = output.parent() {
@@ -462,7 +454,8 @@ fn main() {
     let lock_port = OsStoreLockPort;
     let hw_probe = Arc::new(SysinfoHardwareProbe);
     let file_executor = Arc::new(OsScopedFileExecutor);
-    let worker_spawner = resolve_worker_spawner(cli.worker_bin);
+    let worker_spawner =
+        resolve_default_worker_spawner(cli.worker_bin, cli.worker_backend.as_deref());
 
     let auto_decision = match &cli.command {
         Commands::Ask {
@@ -518,8 +511,10 @@ fn main() {
     }
 
     let res: Result<(), LoraError> = (|| match cli.command {
+        Commands::Banner => Ok(()),
         Commands::Inspect { signal } => {
             let snap = hw_probe.capture_snapshot(&data_dir)?;
+            println!("{TERMINAL_ASCII_BANNER}");
             println!("Lora Agent CLI v{}", env!("CARGO_PKG_VERSION"));
             println!("Pinned worker revision : {PINNED_LLAMA_CPP_REVISION}");
             println!("Wire protocol major    : v{SUPPORTED_PROTOCOL_MAJOR}");

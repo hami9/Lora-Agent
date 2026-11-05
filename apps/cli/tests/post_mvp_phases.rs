@@ -882,6 +882,67 @@ fn cli_subprocess_e2e_workflow() {
         .output()
         .unwrap();
     assert!(!handoff_escalated.status.success());
+
+    // 7. Import a GGUF model with a standard ChatML template ({{ message.content }}) and run `lora ask` with `--worker-backend deterministic`
+    use lora_protocol::{build_synthetic_gguf, SyntheticGgufSpec};
+    let chatml_gguf_path = tmp.path().join("chatml-qwen3.gguf");
+    let chatml_bytes = build_synthetic_gguf(&SyntheticGgufSpec {
+        architecture: "qwen3".to_string(),
+        model_name: "qwen3-chatml".to_string(),
+        chat_template: Some(
+            "{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}"
+                .to_string(),
+        ),
+        ..SyntheticGgufSpec::default()
+    });
+    fs::write(&chatml_gguf_path, &chatml_bytes).unwrap();
+
+    let import_chatml = Command::new(lora_bin)
+        .env("LORA_DATA_DIR", &data_dir)
+        .args([
+            "--worker-backend",
+            "deterministic",
+            "import",
+            chatml_gguf_path.to_str().unwrap(),
+            "--alias",
+            "qwen3-chatml",
+        ])
+        .output()
+        .unwrap();
+    assert!(import_chatml.status.success());
+
+    fs::write(ws.join("guide.md"), "RECOMMENDED_OPTION=local_safe_mode\n").unwrap();
+    let ask_chatml = Command::new(lora_bin)
+        .env("LORA_DATA_DIR", &data_dir)
+        .args([
+            "--worker-backend",
+            "deterministic",
+            "ask",
+            "--model",
+            "qwen3-chatml",
+            "--scope",
+            ws.to_str().unwrap(),
+            "--prompt",
+            "Read file:guide.md and report option",
+            "--approve-once",
+        ])
+        .output()
+        .unwrap();
+    assert!(ask_chatml.status.success());
+    let ask_stdout = String::from_utf8_lossy(&ask_chatml.stdout);
+    assert!(ask_stdout.contains("local_safe_mode"));
+    assert!(ask_stdout.contains("guide.md"));
+
+    // 8. Verify terminal ASCII art banner via `lora banner`
+    let banner_out = Command::new(lora_bin)
+        .env("LORA_DATA_DIR", &data_dir)
+        .args(["banner"])
+        .output()
+        .unwrap();
+    assert!(banner_out.status.success());
+    let banner_stdout = String::from_utf8_lossy(&banner_out.stdout);
+    assert!(banner_stdout.contains(".:+***+=:..:."));
+    assert!(banner_stdout.contains("Lora Agent CLI"));
 }
 
 #[test]
