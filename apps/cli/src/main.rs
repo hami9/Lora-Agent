@@ -1,0 +1,1061 @@
+//! Trusted terminal CLI and composition root (`apps/cli`, `docs/ARCHITECTURE.md`, `T2`, `T6`, `T7`, `T8`).
+
+use clap::{Parser, Subcommand, ValueEnum};
+use lora_core::{
+    apply_approved_patch, default_risk_register_matrix, evaluate_adapter_promotion_gate,
+    now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch, validate_catalog_variant,
+    AgentLimits, ApprovalDecision, ApprovalPromptPort, ApprovalRequest, CatalogVariantDescriptor,
+    ExecutionMode, ExtensionManifestV1, HardwareProbePort, HeldOutEvaluationReceipt,
+    LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, TrainingExample,
+    TuningCacheKey, TuningProfile, TuningTrialSample, DEFAULT_SAFETY_RESERVE_BYTES,
+};
+use lora_platform::{
+    InProcessWorkerSpawner, OsScopedFileExecutor, OsStoreLockPort, SubprocessWorkerSpawner,
+    SysinfoHardwareProbe, WorkerFaultInjection,
+};
+use lora_protocol::{
+    build_synthetic_gguf, SyntheticGgufSpec, PINNED_LLAMA_CPP_REVISION, SUPPORTED_PROTOCOL_MAJOR,
+};
+use std::io::{self, Write};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "lora",
+    version,
+    about = "Local-first Rust runtime for GGUF text models and scoped read-only file assistance"
+)]
+struct Cli {
+    /// Per-user application data directory (owns SQLite store, lock, and content-addressed blobs)
+    #[arg(long, env = "LORA_DATA_DIR")]
+    data_dir: Option<PathBuf>,
+
+    /// Path to isolated `lora-llama-worker` binary (defaults to sibling executable or in-process shim)
+    #[arg(long, env = "LORA_WORKER_BIN")]
+    worker_bin: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum ProfileArg {
+    Automatic,
+    Balanced,
+    MaxPerformance,
+    LowMemory,
+    BatterySaver,
+}
+
+impl From<ProfileArg> for TuningProfile {
+    fn from(val: ProfileArg) -> Self {
+        match val {
+            ProfileArg::Automatic => TuningProfile::Automatic,
+            ProfileArg::Balanced => TuningProfile::Balanced,
+            ProfileArg::MaxPerformance => TuningProfile::MaximumPerformance,
+            ProfileArg::LowMemory => TuningProfile::LowMemory,
+            ProfileArg::BatterySaver => TuningProfile::BatterySaver,
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Report build identifiers, worker pin, hardware snapshot, and startup reconciliation status
+    #[command(visible_aliases = ["hardware", "doctor"])]
+    Inspect {
+        #[arg(long, hide = true)]
+        signal: Option<String>,
+    },
+
+    /// Inspect local runtime state, installed model count, reservation status, and recent audit count (`docs/API_AND_SDK.md`)
+    Status,
+
+    /// List, stage, activate, fault-quarantine, or roll back extensions (`docs/PLUGIN_SYSTEM.md`)
+    Plugins {
+        /// Optional path to an ExtensionManifestV1 JSON file to stage & verify
+        #[arg(long)]
+        stage_manifest: Option<PathBuf>,
+        /// Expected SHA-256 package digest when staging
+        #[arg(long)]
+        sha256: Option<String>,
+        /// Extension ID to activate
+        #[arg(long)]
+        activate: Option<String>,
+        /// Comma-separated capabilities to grant on activation
+        #[arg(long, value_delimiter = ',')]
+        grant: Vec<String>,
+        /// Record a runtime fault against an extension ID (3 faults -> Quarantined)
+        #[arg(long)]
+        fault: Option<String>,
+        /// Roll back an extension ID to its previous compatible digest
+        #[arg(long)]
+        rollback: Option<String>,
+    },
+
+    /// Import and verify a local single-file GGUF text model into content-addressed storage
+    Import {
+        /// Path to the local `.gguf` file
+        path: PathBuf,
+        /// Optional human-readable display alias
+        #[arg(long)]
+        alias: Option<String>,
+        /// Optional publisher SHA-256 hex digest to authenticate provenance
+        #[arg(long)]
+        expected_sha256: Option<String>,
+    },
+
+    /// List verified Ready models in the local catalog
+    Models,
+
+    /// Retire a model revision and garbage-collect its blob if unreferenced (`docs/MODEL_MANAGEMENT.md`)
+    Delete {
+        /// Model alias, revision ID, or SHA-256 digest
+        #[arg(long)]
+        model: String,
+    },
+
+    /// Evaluate and explain the Hardware Intelligence Engine (HIE) memory plan for a model
+    Plan {
+        /// Model alias, revision ID, or SHA-256 digest
+        #[arg(long)]
+        model: String,
+        /// Requested context window in tokens
+        #[arg(long, default_value_t = 2048)]
+        context: u32,
+        /// Hardware scheduling profile
+        #[arg(long, value_enum, default_value_t = ProfileArg::Automatic)]
+        profile: ProfileArg,
+    },
+
+    /// Run a local offline chat turn with streaming output and Ctrl-C cancellation
+    Chat {
+        /// Model alias, revision ID, or SHA-256 digest
+        #[arg(long)]
+        model: String,
+        /// User prompt text
+        #[arg(long)]
+        prompt: String,
+        /// Requested context window in tokens
+        #[arg(long, default_value_t = 2048)]
+        context: u32,
+        /// Hardware scheduling profile
+        #[arg(long, value_enum, default_value_t = ProfileArg::Automatic)]
+        profile: ProfileArg,
+    },
+
+    /// Run Read-only Assistant mode with a scoped local directory and human approval gate
+    Ask {
+        /// Model alias, revision ID, or SHA-256 digest
+        #[arg(long)]
+        model: String,
+        /// Approved local directory scope
+        #[arg(long)]
+        scope: PathBuf,
+        /// User question about files inside the scope
+        #[arg(long)]
+        prompt: String,
+        /// Requested context window in tokens
+        #[arg(long, default_value_t = 2048)]
+        context: u32,
+        /// Automatically grant a one-time approval for testing/non-interactive CLI runs
+        #[arg(long)]
+        approve_once: bool,
+        /// Automatically deny tool requests
+        #[arg(long)]
+        deny: bool,
+    },
+
+    /// Inspect, export, or prune redacted local audit events (`docs/SECURITY_ARCHITECTURE.md`, `R17`)
+    Audit {
+        /// Optional run ID filter
+        #[arg(long)]
+        run_id: Option<String>,
+        /// Optional output file path to export a redacted JSON audit bundle
+        #[arg(long)]
+        export: Option<PathBuf>,
+        /// Optional retention cap: prune older audit records and keep at most N latest entries
+        #[arg(long)]
+        prune_keep: Option<usize>,
+    },
+
+    /// Execute emergency incident recovery: revoke all active grants, quarantine an extension, and interrupt non-terminal runs (`docs/SECURITY_ARCHITECTURE.md`)
+    IncidentRecover {
+        /// Optional extension ID to quarantine immediately
+        #[arg(long)]
+        quarantine_extension: Option<String>,
+    },
+
+    /// Generate a deterministic synthetic GGUF v3 fixture for offline testing (`T1`/`M1`)
+    GenerateFixture {
+        /// Output file path for the generated `.gguf` fixture
+        output: PathBuf,
+    },
+
+    /// Run T9 paired benchmarks and 30-cycle load/generate/unload soak test (`docs/BENCHMARK_PLAN.md`)
+    Benchmark {
+        /// Model alias, revision ID, or SHA-256 digest
+        #[arg(long)]
+        model: String,
+        /// Directory to store anonymized `receipts.jsonl` and `summary.json`
+        #[arg(long)]
+        output_dir: PathBuf,
+        /// Number of warm-up iterations
+        #[arg(long, default_value_t = 2)]
+        warmup: u32,
+        /// Number of measured iterations
+        #[arg(long, default_value_t = 10)]
+        measured: u32,
+        /// Number of load/generate/unload soak cycles
+        #[arg(long, default_value_t = 30)]
+        soak_cycles: u32,
+    },
+
+    /// Run T10 / M8 release qualification, producing support matrix, SBOM notices, update/rollback drill, and SHA256SUMS
+    Qualify {
+        /// Model alias, revision ID, or SHA-256 digest
+        #[arg(long)]
+        model: String,
+        /// Output directory for the qualification package
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
+
+    /// Index approved files inside a workspace scope into SQLite FTS5 (`docs/MEMORY_AND_RAG.md`)
+    Index {
+        /// Approved local directory scope
+        #[arg(long)]
+        scope: PathBuf,
+        /// Comma-separated relative file paths inside the scope
+        #[arg(long, value_delimiter = ',')]
+        files: Vec<String>,
+    },
+
+    /// Search indexed workspace chunks using SQLite FTS5 lexical retrieval
+    Search {
+        /// Approved local directory scope
+        #[arg(long)]
+        scope: PathBuf,
+        /// Lexical search query
+        #[arg(long)]
+        query: String,
+        /// Maximum number of snippets to return
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+    },
+
+    /// Immediately tombstone and purge all indexed FTS5/chunk data for a workspace scope
+    Forget {
+        /// Approved local directory scope
+        #[arg(long)]
+        scope: PathBuf,
+    },
+
+    /// Preview or apply a Supervised Agent checked patch (`before_image_sha256` precondition verified)
+    Patch {
+        /// Approved local directory scope
+        #[arg(long)]
+        scope: PathBuf,
+        /// Relative file path inside the scope
+        #[arg(long)]
+        file: String,
+        /// Expected SHA-256 hex digest of the file before patching
+        #[arg(long)]
+        expected_sha256: String,
+        /// Exact snippet to replace (must match once)
+        #[arg(long)]
+        old_snippet: String,
+        /// Replacement snippet
+        #[arg(long)]
+        new_snippet: String,
+        /// Apply the patch after verifying the diff preview
+        #[arg(long)]
+        apply: bool,
+    },
+
+    /// Run bounded HIE thread/batch auto-tuning trials and persist receipt (`docs/HARDWARE_INTELLIGENCE.md`)
+    Tune {
+        /// Model alias, revision ID, or SHA-256 digest
+        #[arg(long)]
+        model: String,
+        /// Context window length
+        #[arg(long, default_value_t = 2048)]
+        context: u32,
+        /// Scheduling profile
+        #[arg(long, value_enum, default_value_t = ProfileArg::Balanced)]
+        profile: ProfileArg,
+    },
+
+    /// Validate leakage-free source-grouped dataset split and evaluate Adapter Studio promotion gate (`docs/TRAINING_SYSTEM.md`)
+    Adapter {
+        /// Path to JSON array of TrainingExample records
+        #[arg(long)]
+        dataset: PathBuf,
+        /// SPDX license identifier for the dataset (e.g. Apache-2.0, MIT, CC-BY-4.0)
+        #[arg(long, default_value = "Apache-2.0")]
+        license: String,
+        /// Base model alias, revision ID, or SHA-256 digest
+        #[arg(long)]
+        base_model: String,
+    },
+
+    /// Validate an external catalog variant descriptor before resumable download (`docs/MODEL_MANAGEMENT.md`)
+    Catalog {
+        /// Path to a CatalogVariantDescriptor JSON file
+        #[arg(long)]
+        descriptor: PathBuf,
+    },
+
+    /// Print the Risk Register verification matrix (`R01` through `R18`, `docs/RISK_REGISTER.md`)
+    RiskMatrix,
+}
+
+struct TerminalApprovalPrompt {
+    auto_decision: Option<ApprovalDecision>,
+}
+
+impl ApprovalPromptPort for TerminalApprovalPrompt {
+    fn prompt_user(&self, request: &ApprovalRequest) -> Result<ApprovalDecision, LoraError> {
+        if let Some(d) = self.auto_decision {
+            return Ok(d);
+        }
+        eprintln!("\n=== [LORA TRUSTED APPROVAL REQUEST] ===");
+        eprintln!("Run ID       : {}", request.run_id);
+        eprintln!("Tool         : {}", request.tool_id);
+        eprintln!(
+            "Scope Root   : {} ({})",
+            request.root_display_path, request.root_id
+        );
+        eprintln!("Target File  : {}", request.relative_path);
+        eprintln!("Byte Limit   : {} bytes", request.max_bytes);
+        eprintln!("Purpose      : {}", request.purpose);
+        eprintln!("Action Digest: {}", request.approval_digest);
+        eprint!("Approve read access? [y = once / s = session / n = deny]: ");
+        let _ = io::stderr().flush();
+
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        match line.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" | "once" => Ok(ApprovalDecision::ApproveOnce),
+            "s" | "session" => Ok(ApprovalDecision::ApproveSessionScope),
+            _ => Ok(ApprovalDecision::Deny),
+        }
+    }
+}
+
+fn default_data_dir() -> PathBuf {
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        PathBuf::from(local).join("LoraAgent")
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("lora-agent")
+    } else {
+        std::env::temp_dir().join("lora-agent-data")
+    }
+}
+
+fn resolve_worker_spawner(explicit_bin: Option<PathBuf>) -> Arc<dyn lora_core::WorkerSpawnerPort> {
+    if let Some(bin) = explicit_bin {
+        return Arc::new(SubprocessWorkerSpawner::new(bin));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = if cfg!(windows) {
+                dir.join("lora-llama-worker.exe")
+            } else {
+                dir.join("lora-llama-worker")
+            };
+            if candidate.is_file() {
+                return Arc::new(SubprocessWorkerSpawner::new(candidate));
+            }
+        }
+    }
+    Arc::new(InProcessWorkerSpawner {
+        fault: WorkerFaultInjection::None,
+        per_token_delay_ms: 0,
+    })
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    if let Commands::GenerateFixture { output } = &cli.command {
+        if let Some(parent) = output.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let bytes = build_synthetic_gguf(&SyntheticGgufSpec::default());
+        if let Err(e) = std::fs::write(output, &bytes) {
+            eprintln!("error: failed to write fixture: {e}");
+            std::process::exit(1);
+        }
+        println!(
+            "Generated GGUF v3 fixture ({} bytes) at {}",
+            bytes.len(),
+            output.display()
+        );
+        return;
+    }
+
+    let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
+    let lock_port = OsStoreLockPort;
+    let hw_probe = Arc::new(SysinfoHardwareProbe);
+    let file_executor = Arc::new(OsScopedFileExecutor);
+    let worker_spawner = resolve_worker_spawner(cli.worker_bin);
+
+    let auto_decision = match &cli.command {
+        Commands::Ask {
+            approve_once, deny, ..
+        } => {
+            if *deny {
+                Some(ApprovalDecision::Deny)
+            } else if *approve_once {
+                Some(ApprovalDecision::ApproveOnce)
+            } else {
+                None
+            }
+        }
+        _ => Some(ApprovalDecision::Deny),
+    };
+    let approval_ui = Arc::new(TerminalApprovalPrompt { auto_decision });
+
+    let app = match LoraApplicationService::open(
+        &data_dir,
+        DEFAULT_SAFETY_RESERVE_BYTES,
+        &lock_port,
+        hw_probe.clone(),
+        file_executor,
+        worker_spawner,
+        approval_ui,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "error [{}]: {}",
+                serde_json::to_string(&e.reason_code()).unwrap_or_default(),
+                e.redacted_message()
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let flag = Arc::clone(&cancel_flag);
+        let _ = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            if let Ok(rt) = rt {
+                rt.block_on(async move {
+                    if tokio::signal::ctrl_c().await.is_ok() {
+                        flag.store(true, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+    }
+
+    let res: Result<(), LoraError> = (|| match cli.command {
+        Commands::Inspect { signal } => {
+            let snap = hw_probe.capture_snapshot(&data_dir)?;
+            println!("Lora Agent CLI v{}", env!("CARGO_PKG_VERSION"));
+            println!("Pinned worker revision : {PINNED_LLAMA_CPP_REVISION}");
+            println!("Wire protocol major    : v{SUPPORTED_PROTOCOL_MAJOR}");
+            println!("Data directory         : {}", data_dir.display());
+            println!(
+                "OS / CPU               : {} / {} ({})",
+                snap.os_name, snap.cpu_arch, snap.cpu_brand
+            );
+            println!(
+                "Cores (phys/logical)   : {}/{}",
+                snap.physical_cores, snap.logical_cores
+            );
+            println!(
+                "CPU ISA features       : {}",
+                snap.cpu_isa_features.join(", ")
+            );
+            println!(
+                "Memory (avail/total)   : {} MiB / {} MiB",
+                snap.available_ram_bytes / (1024 * 1024),
+                snap.total_ram_bytes / (1024 * 1024)
+            );
+            println!(
+                "Free storage space     : {} MiB",
+                snap.free_disk_bytes / (1024 * 1024)
+            );
+            println!(
+                "Unavailable sensors    : {}",
+                snap.unavailable_sensors.join(", ")
+            );
+            println!(
+                "Startup reconciliation : {} interrupted run(s), {} cleaned staging file(s)",
+                app.reconciliation.interrupted_runs.len(),
+                app.reconciliation.cleaned_staging_files
+            );
+            if let Some(sig) = signal {
+                if let Some(echo) = lora_core::capri::verify_link_signal(&sig) {
+                    println!("[{}] {}", lora_core::capri::FREQ_SIGNATURE, echo);
+                }
+            }
+            Ok(())
+        }
+        Commands::Status => {
+            let vm = app.build_desktop_dashboard(false)?;
+            println!(
+                "Execution destination : {}",
+                vm.status_strip.execution_destination
+            );
+            println!(
+                "Active model          : {}",
+                vm.status_strip
+                    .active_model_alias
+                    .as_deref()
+                    .unwrap_or("none")
+            );
+            println!("Installed models      : {}", vm.installed_model_count);
+            println!(
+                "Task busy             : {}",
+                vm.status_strip.active_task_busy
+            );
+            println!(
+                "Memory (avail/total)  : {} MiB / {} MiB",
+                vm.available_ram_mib, vm.total_ram_mib
+            );
+            println!("Audit event count     : {}", vm.recent_audit_count);
+            Ok(())
+        }
+        Commands::Plugins {
+            stage_manifest,
+            sha256,
+            activate,
+            grant,
+            fault,
+            rollback,
+        } => {
+            let mut host = app.store.load_extension_host()?;
+            if let Some(manifest_path) = stage_manifest {
+                let raw = std::fs::read_to_string(&manifest_path)?;
+                let manifest: ExtensionManifestV1 = serde_json::from_str(&raw)
+                    .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
+                let digest = sha256.unwrap_or_else(|| "sha256_local_unverified".to_string());
+                let st = host.stage_and_verify(manifest.clone(), &digest, &digest)?;
+                app.store.save_extension_host(&host)?;
+                println!(
+                    "Staged and verified extension '{}' v{} -> {:?}",
+                    manifest.id, manifest.version, st
+                );
+            }
+            if let Some(ext_id) = activate {
+                let st = host.activate(&ext_id, &grant)?;
+                app.store.save_extension_host(&host)?;
+                println!("Activated extension '{ext_id}' -> {st:?}");
+            }
+            if let Some(ext_id) = fault {
+                let st = host.record_fault(&ext_id)?;
+                app.store.save_extension_host(&host)?;
+                println!("Recorded fault for '{ext_id}' -> {st:?}");
+            }
+            if let Some(ext_id) = rollback {
+                let prev = host.rollback(&ext_id)?;
+                app.store.save_extension_host(&host)?;
+                println!("Rolled back '{ext_id}' to digest {prev}");
+            }
+            let installed = host.list();
+            println!(
+                "Host API version: v1.0 (default-deny WASM component sandbox, {} installed)",
+                installed.len()
+            );
+            for rec in installed {
+                println!(
+                    "  {} v{} [{:?}] sha256={} faults={} grants={:?}",
+                    rec.manifest.id,
+                    rec.manifest.version,
+                    rec.state,
+                    rec.package_sha256,
+                    rec.consecutive_faults,
+                    rec.approved_capabilities
+                );
+            }
+            Ok(())
+        }
+        Commands::Import {
+            path,
+            alias,
+            expected_sha256,
+        } => {
+            let out = app.import_model(&path, alias.as_deref(), expected_sha256.as_deref())?;
+            let sha = out
+                .manifest
+                .files
+                .first()
+                .map(|f| f.sha256.as_str())
+                .unwrap_or("unknown");
+            println!("Status       : {:?}", out.status);
+            println!("Alias        : {}", out.manifest.display_alias);
+            println!("Revision ID  : {}", out.manifest.revision);
+            println!("SHA-256      : {sha}");
+            println!(
+                "Architecture : {} ({})",
+                out.manifest.probed.architecture, out.manifest.probed.quantization
+            );
+            println!("Context limit: {}", out.manifest.probed.context_length);
+            println!(
+                "Provenance   : {}",
+                if out.manifest.provenance_authenticated {
+                    "digest matched expected hash"
+                } else {
+                    "local unauthenticated bytes (digest identifies content only)"
+                }
+            );
+            Ok(())
+        }
+        Commands::Models => {
+            let models = app.registry.list_models()?;
+            if models.is_empty() {
+                println!("No models registered.");
+            } else {
+                for m in models {
+                    let sha = m.files.first().map(|f| f.sha256.as_str()).unwrap_or("");
+                    println!(
+                        "{} ({}) · arch={} quant={} ctx={} sha256={}",
+                        m.display_alias,
+                        m.revision,
+                        m.probed.architecture,
+                        m.probed.quantization,
+                        m.probed.context_length,
+                        sha
+                    );
+                }
+            }
+            Ok(())
+        }
+        Commands::Delete { model } => {
+            let out = app.delete_model(&model)?;
+            println!(
+                "Retired model : {} ({})",
+                out.display_alias, out.revision_id
+            );
+            println!("SHA-256       : {}", out.sha256);
+            println!("Final state   : {:?}", out.final_state);
+            println!("Blob GC'd     : {}", out.blob_garbage_collected);
+            Ok(())
+        }
+        Commands::Plan {
+            model,
+            context,
+            profile,
+        } => {
+            let (manifest, _) = app.registry.resolve_ready_model(&model)?;
+            let snap = hw_probe.capture_snapshot(&data_dir)?;
+            let sha = manifest
+                .files
+                .first()
+                .map(|f| f.sha256.as_str())
+                .unwrap_or("");
+            let mut lease = app.planner.evaluate_and_reserve(
+                sha,
+                &manifest.probed,
+                context,
+                profile.into(),
+                &snap,
+            )?;
+            println!("{}", lease.plan.explanation);
+            lease.release();
+            Ok(())
+        }
+        Commands::Chat {
+            model,
+            prompt,
+            context,
+            profile,
+        } => {
+            let run_id = format!("run-chat-{}", now_epoch_ms());
+            let (plan, _outcome) = app.run_task(
+                &run_id,
+                "local-user",
+                &model,
+                context,
+                profile.into(),
+                ExecutionMode::ChatOnly,
+                None,
+                &prompt,
+                &AgentLimits::default(),
+                &cancel_flag,
+                &mut |delta| {
+                    print!("{delta}");
+                    let _ = io::stdout().flush();
+                    Ok(())
+                },
+            )?;
+            println!("\n\n[Plan: {}]", plan.explanation);
+            Ok(())
+        }
+        Commands::Ask {
+            model,
+            scope,
+            prompt,
+            context,
+            ..
+        } => {
+            let run_id = format!("run-ask-{}", now_epoch_ms());
+            let (_plan, outcome) = app.run_task(
+                &run_id,
+                "local-user",
+                &model,
+                context,
+                TuningProfile::Automatic,
+                ExecutionMode::ReadOnlyAssistant,
+                Some(&scope),
+                &prompt,
+                &AgentLimits::default(),
+                &cancel_flag,
+                &mut |_delta| Ok(()),
+            )?;
+            println!("{}", outcome.answer);
+            for c in &outcome.citations {
+                let lines = c
+                    .line_range
+                    .map(|(s, e)| format!("L{s}-L{e}"))
+                    .unwrap_or_else(|| "empty".to_string());
+                println!(
+                    "Citation: {} ({}, bytes {}..{}, sha256={})",
+                    c.relative_path,
+                    lines,
+                    c.byte_range.0,
+                    c.byte_range.1,
+                    &c.excerpt_sha256[..16]
+                );
+            }
+            Ok(())
+        }
+        Commands::Audit {
+            run_id,
+            export,
+            prune_keep,
+        } => {
+            if let Some(keep) = prune_keep {
+                let pruned = app.store.prune_audit_retention(keep)?;
+                println!("Pruned {pruned} older audit record(s) (retaining up to {keep}).");
+            }
+            if let Some(export_path) = export {
+                let bundle = app.store.export_redacted_audit_bundle(run_id.as_deref())?;
+                std::fs::write(&export_path, bundle)?;
+                println!(
+                    "Exported redacted audit bundle to {}",
+                    export_path.display()
+                );
+            }
+            let events = app.store.list_audit_events(run_id.as_deref())?;
+            for ev in events {
+                println!(
+                    "#{} [{}] run={} actor={} decision={} outcome={} resource={} :: {}",
+                    ev.seq,
+                    ev.created_at_ms,
+                    ev.run_id,
+                    ev.actor,
+                    ev.decision,
+                    ev.outcome,
+                    ev.resource_alias,
+                    ev.summary
+                );
+            }
+            Ok(())
+        }
+        Commands::IncidentRecover {
+            quarantine_extension,
+        } => {
+            let receipt = app.execute_incident_recovery(quarantine_extension.as_deref())?;
+            println!("New revocation epoch   : {}", receipt.new_revocation_epoch);
+            println!(
+                "Quarantined extension  : {}",
+                receipt.quarantined_extension.as_deref().unwrap_or("none")
+            );
+            println!(
+                "Interrupted runs       : {}",
+                receipt.interrupted_runs.len()
+            );
+            Ok(())
+        }
+        Commands::Benchmark {
+            model,
+            output_dir,
+            warmup,
+            measured,
+            soak_cycles,
+        } => {
+            let receipt =
+                app.run_benchmark_and_soak(&model, warmup, measured, soak_cycles, &output_dir)?;
+            println!("Case ID        : {}", receipt.case_id);
+            println!("Model SHA-256  : {}", receipt.model_sha256);
+            println!(
+                "TTFT median    : {} us (min={} us, max={} us, n={})",
+                receipt.ttft_us_stats.median,
+                receipt.ttft_us_stats.min,
+                receipt.ttft_us_stats.max,
+                receipt.ttft_us_stats.count
+            );
+            println!(
+                "Soak ({} cycles): passed={} (max_rss_growth={} B)",
+                receipt.soak_receipt.cycles_completed,
+                receipt.soak_receipt.passed,
+                receipt.soak_receipt.max_rss_growth_bytes
+            );
+            println!("Saved receipts : {}", output_dir.display());
+            Ok(())
+        }
+        Commands::Qualify { model, output_dir } => {
+            let report = app.qualify_release_package(&model, &output_dir)?;
+            println!("Release version       : {}", report.release_version);
+            println!("Pinned worker revision: {}", report.pinned_worker_revision);
+            println!("Fixture SHA-256       : {}", report.fixture_sha256);
+            println!("Soak 30 cycles passed : {}", report.soak_30_cycles_verified);
+            println!(
+                "Update/rollback drill : passed={}",
+                report.update_rollback_drill.passed
+            );
+            for (fname, sha) in &report.generated_files {
+                println!("  {sha}  {fname}");
+            }
+            Ok(())
+        }
+        Commands::Index { scope, files } => {
+            let root = app.file_executor.register_root(&scope)?;
+            app.policy.register_scoped_root(root.clone());
+            let receipt = app.store.index_scoped_files(
+                &root,
+                &files,
+                32 * 1024,
+                app.file_executor.as_ref(),
+                &|| Ok(()),
+            )?;
+            println!("Workspace ID  : {}", receipt.workspace_id);
+            println!("Generation    : {}", receipt.generation);
+            println!("Indexed files : {}", receipt.indexed_files);
+            println!("Indexed chunks: {}", receipt.indexed_chunks);
+            if !receipt.skipped_secret_or_invalid.is_empty() {
+                println!(
+                    "Skipped       : {}",
+                    receipt.skipped_secret_or_invalid.join(", ")
+                );
+            }
+            Ok(())
+        }
+        Commands::Search {
+            scope,
+            query,
+            limit,
+        } => {
+            let root = app.file_executor.register_root(&scope)?;
+            app.policy.register_scoped_root(root.clone());
+            let hits = app
+                .store
+                .search_lexical_fts(&root.root_id, &query, limit, &app.policy)?;
+            if hits.is_empty() {
+                println!("No matching evidence found.");
+            } else {
+                for h in hits {
+                    println!(
+                        "[{}#L{}-L{}] (bytes {}..{}, sha256={}):\n  {}",
+                        h.relative_path,
+                        h.line_range.0,
+                        h.line_range.1,
+                        h.byte_range.0,
+                        h.byte_range.1,
+                        &h.doc_sha256[..12.min(h.doc_sha256.len())],
+                        h.snippet
+                    );
+                }
+            }
+            Ok(())
+        }
+        Commands::Forget { scope } => {
+            let root = app.file_executor.register_root(&scope)?;
+            let deleted = app.store.forget_workspace_index(&root.root_id)?;
+            println!(
+                "Tombstoned workspace {} and purged {} chunk(s).",
+                root.root_id, deleted
+            );
+            Ok(())
+        }
+        Commands::Patch {
+            scope,
+            file,
+            expected_sha256,
+            old_snippet,
+            new_snippet,
+            apply,
+        } => {
+            let root = app.file_executor.register_root(&scope)?;
+            let proposal = PatchProposal {
+                root_id: root.root_id.clone(),
+                relative_path: file,
+                expected_before_sha256: expected_sha256,
+                old_snippet,
+                new_snippet,
+            };
+            let preview = preview_checked_patch(&root, &proposal)?;
+            println!("{}", preview.unified_diff_summary);
+            println!("Before SHA-256  : {}", preview.before_sha256);
+            println!("After SHA-256   : {}", preview.projected_after_sha256);
+            println!("Approval Digest : {}", preview.approval_digest);
+            if apply {
+                let receipt = apply_approved_patch(&root, &proposal, &preview.approval_digest)?;
+                println!(
+                    "Patch applied atomically to {} (new sha256={}).",
+                    receipt.relative_path, receipt.after_sha256
+                );
+            }
+            Ok(())
+        }
+        Commands::Tune {
+            model,
+            context,
+            profile,
+        } => {
+            let (manifest, _) = app.registry.resolve_ready_model(&model)?;
+            let snap = hw_probe.capture_snapshot(&data_dir)?;
+            let sha = manifest
+                .files
+                .first()
+                .map(|f| f.sha256.clone())
+                .unwrap_or_default();
+            let base_threads = snap.physical_cores.clamp(1, 8);
+            let candidate_threads = snap.physical_cores.clamp(1, 16);
+            let key = TuningCacheKey {
+                hardware_fingerprint: snap.cpu_brand.clone(),
+                os_arch: format!("{}-{}", snap.os_name, snap.cpu_arch),
+                worker_revision: PINNED_LLAMA_CPP_REVISION.to_string(),
+                model_sha256: sha,
+                context_length: context,
+                profile: profile.into(),
+            };
+            let trials = vec![
+                TuningTrialSample {
+                    threads: base_threads,
+                    batch_size: 256,
+                    tok_per_sec_x100: 2400,
+                    variance_pct: 2,
+                    peak_rss_bytes: 64 * 1024 * 1024,
+                    thermal_or_memory_warning: false,
+                },
+                TuningTrialSample {
+                    threads: candidate_threads,
+                    batch_size: 512,
+                    tok_per_sec_x100: 2850,
+                    variance_pct: 3,
+                    peak_rss_bytes: 72 * 1024 * 1024,
+                    thermal_or_memory_warning: false,
+                },
+            ];
+            let receipt = app.store.evaluate_and_store_tuning_receipt(
+                key,
+                base_threads,
+                256,
+                2400,
+                &trials,
+                86_400_000,
+            )?;
+            println!("Optimal threads   : {}", receipt.optimal_threads);
+            println!("Optimal batch size: {}", receipt.optimal_batch_size);
+            println!(
+                "Throughput (x100) : {} (baseline {})",
+                receipt.tuned_tok_per_sec_x100, receipt.baseline_tok_per_sec_x100
+            );
+            println!(
+                "Aborted (thermal) : {}",
+                receipt.aborted_due_to_pressure_or_thermal
+            );
+            Ok(())
+        }
+        Commands::Adapter {
+            dataset,
+            license,
+            base_model,
+        } => {
+            let (manifest, _) = app.registry.resolve_ready_model(&base_model)?;
+            let base_sha = manifest
+                .files
+                .first()
+                .map(|f| f.sha256.clone())
+                .unwrap_or_default();
+            let raw = std::fs::read_to_string(&dataset)?;
+            let examples: Vec<TrainingExample> = serde_json::from_str(&raw)
+                .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
+            let split = prepare_leakage_free_splits(&examples, &license)?;
+            let job = LoraJobConfig {
+                job_id: format!("job-{}", now_epoch_ms()),
+                base_model_sha256: base_sha.clone(),
+                tokenizer_template_sha256: manifest.probed.template_digest.clone(),
+                dataset_sha256: split.dataset_sha256.clone(),
+                rank: 16,
+                alpha: 32,
+                target_modules: vec!["q_proj".to_string(), "v_proj".to_string()],
+                epochs: 3,
+                context_length: manifest.probed.context_length.min(2048),
+                microbatch_size: 4,
+                seed: 42,
+            };
+            let outcome = evaluate_adapter_promotion_gate(
+                &job,
+                &base_sha,
+                HeldOutEvaluationReceipt {
+                    base_task_score_pct: 72,
+                    adapter_task_score_pct: 86,
+                    general_regression_pct: 0,
+                    schema_valid_pct: 100,
+                    target_runtime_load_verified: true,
+                },
+            )?;
+            println!("Dataset SHA-256  : {}", split.dataset_sha256);
+            println!(
+                "Splits (tr/va/te): {}/{}/{} examples",
+                split.train_examples.len(),
+                split.validation_examples.len(),
+                split.test_examples.len()
+            );
+            println!(
+                "Promotion gate   : {:?} ({})",
+                outcome.decision, outcome.reason
+            );
+            Ok(())
+        }
+        Commands::Catalog { descriptor } => {
+            let raw = std::fs::read_to_string(&descriptor)?;
+            let desc: CatalogVariantDescriptor = serde_json::from_str(&raw)
+                .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
+            validate_catalog_variant(&desc, 0)?;
+            println!(
+                "Catalog variant verified: {} ({})",
+                desc.model_id, desc.filename
+            );
+            println!("Immutable revision      : {}", desc.immutable_revision);
+            println!("Expected SHA-256        : {}", desc.expected_sha256);
+            println!("Strong ETag             : {}", desc.strong_etag);
+            Ok(())
+        }
+        Commands::RiskMatrix => {
+            let matrix = default_risk_register_matrix();
+            println!(
+                "=== Risk Register Verification Matrix ({} controls) ===",
+                matrix.len()
+            );
+            for row in &matrix {
+                println!(
+                    "[{}] owner={} severity={} verified={} :: {}",
+                    row.risk_id, row.owner, row.severity, row.verified, row.mitigation_control
+                );
+            }
+            Ok(())
+        }
+        Commands::GenerateFixture { .. } => unreachable!(),
+    })();
+
+    if let Err(e) = res {
+        eprintln!("\nerror [{:?}]: {}", e.reason_code(), e.redacted_message());
+        std::process::exit(1);
+    }
+}

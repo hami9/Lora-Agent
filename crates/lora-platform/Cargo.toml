@@ -1,0 +1,19 @@
+[package]
+name = "lora-platform"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "OS-specific store locking, hardware discovery probes, handle-checked scoped file executor, and isolated worker supervisor for Lora Agent"
+
+[dependencies]
+lora-core.workspace = true
+lora-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+sysinfo.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

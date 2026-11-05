@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "pinned_worker_revision": "c6a0ff11a0fe16ac1a2eb569190934593a2b3670",
+  "fixture": {
+    "name": "lora-fixture-llama-1b-q4_k_m",
+    "architecture": "llama",
+    "quantization": "Q4_K_M",
+    "license": "Apache-2.0",
+    "context_length": 8192
+  },
+  "cases": [
+    {
+      "id": "bench-short-128",
+      "prompt_tokens": 128,
+      "decode_tokens": 128,
+      "warmup_runs": 2,
+      "measured_runs": 10
+    },
+    {
+      "id": "bench-long-2048",
+      "prompt_tokens": 2048,
+      "decode_tokens": 128,
+      "warmup_runs": 2,
+      "measured_runs": 10
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+[package]
+name = "lora-llama-worker"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Isolated inference worker shim speaking length-prefixed v1 JSON over inherited anonymous pipes"
+
+[[bin]]
+name = "lora-llama-worker"
+path = "src/main.rs"
+
+[features]
+default = []
+# Optional C-API FFI linkage against the pinned llama.cpp build revision
+native-llama-cpp = []
+
+[dependencies]
+lora-protocol.workspace = true
+lora-platform.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true

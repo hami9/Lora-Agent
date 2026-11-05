@@ -1,0 +1,97 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Lora Agent Loopback API",
+    "version": "1.0.0",
+    "description": "Opt-in loopback-only REST and Server-Sent Events (SSE) API protected by Host/Origin validation (R08), bearer token authentication, owner-only run isolation, Last-Event-ID replay windows, and idempotency keys."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8421"
+    }
+  ],
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "summary": "Return daemon readiness and protocol version",
+        "responses": {
+          "200": {
+            "description": "Healthy loopback daemon"
+          }
+        }
+      }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "summary": "Return API version range, enabled operations, and constraints for this principal",
+        "responses": {
+          "200": {
+            "description": "Principal capability descriptor"
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "summary": "List verified models in the local content-addressed registry without absolute paths",
+        "responses": {
+          "200": {
+            "description": "Sanitized model registry inventory"
+          }
+        }
+      }
+    },
+    "/v1/runs": {
+      "post": {
+        "summary": "Create a bounded inference or read-only assistant run",
+        "responses": {
+          "202": {
+            "description": "Run accepted with run_id and SSE events location"
+          },
+          "403": {
+            "description": "Host/Origin rejected or policy denied"
+          },
+          "409": {
+            "description": "Idempotency-Key reused with mismatched payload"
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}": {
+      "get": {
+        "summary": "Owner-only current state, last sequence, and safe terminal metadata",
+        "responses": {
+          "200": {
+            "description": "Run status summary"
+          },
+          "403": {
+            "description": "Cross-principal read denied"
+          },
+          "404": {
+            "description": "Run not found"
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/events": {
+      "get": {
+        "summary": "Authenticated SSE stream with Last-Event-ID replay window and replay-gap detection",
+        "responses": {
+          "200": {
+            "description": "text/event-stream with versioned run events"
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/cancel": {
+      "post": {
+        "summary": "Idempotent owner-only run cancellation",
+        "responses": {
+          "200": {
+            "description": "Terminal or cancellation-pending run summary"
+          }
+        }
+      }
+    }
+  }
+}

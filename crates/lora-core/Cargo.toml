@@ -1,0 +1,20 @@
+[package]
+name = "lora-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Core application services, model registry, hardware admission planner, policy gate, bounded agent runtime, and SQLite persistence for Lora Agent"
+
+[dependencies]
+lora-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "lora-protocol"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Versioned length-prefixed JSON wire protocol and bounded GGUF metadata parser for Lora Agent workers"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true

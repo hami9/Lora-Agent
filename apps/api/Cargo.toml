@@ -1,0 +1,21 @@
+[package]
+name = "lora-api"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lora-api"
+path = "src/main.rs"
+
+[dependencies]
+lora-protocol.workspace = true
+lora-core.workspace = true
+lora-platform.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+

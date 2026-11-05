@@ -1,0 +1,32 @@
+{
+  "engine": "llama.cpp",
+  "upstream_repository": "https://github.com/ggml-org/llama.cpp",
+  "pinned_revision": "c6a0ff11a0fe16ac1a2eb569190934593a2b3670",
+  "patches": [],
+  "cmake_flags": [
+    "-DGGML_NATIVE=OFF",
+    "-DGGML_AVX2=ON",
+    "-DGGML_FMA=ON",
+    "-DLLAMA_BUILD_SERVER=OFF",
+    "-DLLAMA_BUILD_TESTS=OFF",
+    "-DLLAMA_BUILD_EXAMPLES=OFF",
+    "-DBUILD_SHARED_LIBS=OFF"
+  ],
+  "qualified_targets": [
+    {
+      "triple": "x86_64-pc-windows-msvc",
+      "cpu_baseline": "x86-64-v3 (AVX2+FMA)",
+      "backend": "cpu"
+    },
+    {
+      "triple": "x86_64-unknown-linux-gnu",
+      "cpu_baseline": "x86-64-v3 (AVX2+FMA)",
+      "backend": "cpu"
+    },
+    {
+      "triple": "aarch64-apple-darwin",
+      "cpu_baseline": "apple-m1 (NEON+FP16)",
+      "backend": "cpu"
+    }
+  ]
+}
