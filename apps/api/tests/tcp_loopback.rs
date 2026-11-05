@@ -26,6 +26,8 @@ fn loopback_api_live_tcp_socket_e2e() {
     let openapi_str = String::from_utf8_lossy(&openapi_out.stdout);
     assert!(openapi_str.contains("\"openapi\": \"3.1.0\""));
     assert!(openapi_str.contains("\"/v1/capabilities\""));
+    assert!(openapi_str.contains("\"/v1/index\""));
+    assert!(openapi_str.contains("\"/v1/search\""));
 
     // 2. Spawn live `lora-api --once` on loopback port and send authenticated GET /v1/capabilities
     let bind_addr = find_free_loopback_addr();
@@ -104,7 +106,17 @@ fn loopback_api_live_tcp_socket_e2e() {
             .unwrap();
     }
 
-    // 4. Multi-request live TCP session: POST /v1/runs (idempotency + 409 conflict + live execute), GET /v1/runs/{id}/events, POST /v1/runs/{id}/cancel, and 403 DNS-rebinding rejection
+    let ws = tmp.path().join("api_ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(
+        ws.join("guide.md"),
+        "Rollout deployment guidelines\nCONFIG_VALUE=azure_cascade_99\n",
+    )
+    .unwrap();
+
+    // 4. Multi-request live TCP session: POST /v1/runs (idempotency + 409 conflict + live execute),
+    // GET /v1/runs/{id}/events, POST /v1/runs/{id}/cancel, POST /v1/index, POST /v1/search,
+    // and live RAG-grounded assistant run with citations
     let bind_addr2 = find_free_loopback_addr();
     let mut child2 = Command::new(api_bin)
         .args([
@@ -115,7 +127,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "10",
+            "14",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -217,6 +229,62 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r10.contains("event: token_delta"));
     assert!(r10.contains("event: run_completed"));
     assert!(r10.contains("Offline local response"));
+
+    // (i) POST /v1/index indexes workspace files for FTS5 retrieval
+    let body_index = serde_json::json!({
+        "scope": ws.to_str().unwrap(),
+        "files": ["guide.md"],
+    })
+    .to_string();
+    let r11 = send_http(&format!(
+        "POST /v1/index HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_index}",
+        body_index.len()
+    ));
+    assert!(r11.starts_with("HTTP/1.1 200 OK"));
+    assert!(r11.contains("\"indexed_files\":1"));
+    assert!(r11.contains("\"indexed_chunks\":1"));
+
+    // (j) POST /v1/search queries indexed chunks
+    let body_search = serde_json::json!({
+        "scope": ws.to_str().unwrap(),
+        "query": "deployment",
+        "limit": 3,
+    })
+    .to_string();
+    let r12 = send_http(&format!(
+        "POST /v1/search HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_search}",
+        body_search.len()
+    ));
+    assert!(r12.starts_with("HTTP/1.1 200 OK"));
+    assert!(r12.contains("guide.md"));
+
+    // (k) Execute Assistant mode with RAG via POST /v1/runs and verify citation event in SSE
+    let body_rag = serde_json::json!({
+        "model": "api-model",
+        "prompt": "What is the deployment CONFIG_VALUE?",
+        "mode": "assistant",
+        "scope": ws.to_str().unwrap(),
+        "use_rag": true,
+        "execute": true,
+    })
+    .to_string();
+    let r13 = send_http(&format!(
+        "POST /v1/runs HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nIdempotency-Key: idem-tcp-rag\r\nContent-Length: {}\r\n\r\n{body_rag}",
+        body_rag.len()
+    ));
+    assert!(r13.starts_with("HTTP/1.1 202 Accepted"));
+    let rag_json_str = r13.split("\r\n\r\n").nth(1).unwrap();
+    let rag_val: serde_json::Value = serde_json::from_str(rag_json_str).unwrap();
+    let rag_run_id = rag_val["run_id"].as_str().unwrap();
+
+    let r14 = send_http(&format!(
+        "GET /v1/runs/{rag_run_id}/events HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r14.starts_with("HTTP/1.1 200 OK"));
+    assert!(r14.contains("event: plan_selected"));
+    assert!(r14.contains("event: citation"));
+    assert!(r14.contains("event: run_completed"));
+    assert!(r14.contains("azure_cascade_99"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());

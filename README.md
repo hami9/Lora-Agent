@@ -26,7 +26,7 @@
 ## Workspace Architecture
 
 ```text
-├── Cargo.toml                  # Workspace root (version = "0.1.2")
+├── Cargo.toml                  # Workspace root (version = "0.1.3")
 ├── crates/
 │   ├── lora-protocol/          # v1 32-bit BE JSON framing, closed schemas & streaming GGUF v2/v3 parser
 │   ├── lora-core/              # App service, SQLite store, registry, HIE, policy gate & RAG
@@ -126,6 +126,10 @@ lora context-budget --window 2048 --output 512 --user 256
 
 # 10. Serve the desktop UI and read-only JSON view-models on loopback only
 lora-desktop --serve 127.0.0.1:8765
+
+# 11. Run the authenticated loopback REST/SSE API (127.0.0.1 / [::1] only)
+lora-api --bind 127.0.0.1:8421 --token "$LORA_API_TOKEN"
+# Endpoints: /v1/health, /v1/capabilities, /v1/models, /v1/runs, /v1/runs/{id}/events, /v1/index, /v1/search
 ```
 
 ---

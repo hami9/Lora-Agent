@@ -41,6 +41,38 @@
         }
       }
     },
+    "/v1/index": {
+      "post": {
+        "summary": "Index scoped workspace files for SQLite FTS5 lexical RAG retrieval",
+        "responses": {
+          "200": {
+            "description": "IngestionReceipt with indexed chunk and document counts"
+          },
+          "400": {
+            "description": "Invalid scope or missing files"
+          },
+          "403": {
+            "description": "Host/Origin rejected or authorization missing"
+          }
+        }
+      }
+    },
+    "/v1/search": {
+      "post": {
+        "summary": "Search indexed workspace chunks using SQLite FTS5 lexical BM25 ranking",
+        "responses": {
+          "200": {
+            "description": "Array of RetrievedEvidence snippets with line/byte ranges"
+          },
+          "400": {
+            "description": "Invalid scope or query"
+          },
+          "403": {
+            "description": "Host/Origin rejected or authorization missing"
+          }
+        }
+      }
+    },
     "/v1/runs": {
       "post": {
         "summary": "Create a bounded inference or read-only assistant run",

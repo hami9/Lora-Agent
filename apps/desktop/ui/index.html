@@ -179,8 +179,15 @@
       <section id="screen-dashboard" class="screen active" aria-labelledby="h-dashboard">
         <h1 id="h-dashboard">Dashboard</h1>
         <div class="card">
-          <p><strong>Active Model:</strong> None installed — import an offline GGUF artifact in Model Library.</p>
+          <p><strong>Active Model:</strong> <span id="dash-active-model">None installed — import an offline GGUF artifact in Model Library.</span></p>
           <p><strong>Hardware Sensors:</strong> CPU / RAM probed; discrete VRAM and package power reported explicitly as <em>Unavailable</em> when unsupported.</p>
+        </div>
+        <div class="card" id="dash-live" hidden aria-label="Live runtime summary">
+          <p><strong>Installed models:</strong> <span id="dash-model-count">0</span></p>
+          <p><strong>RAM:</strong> <span id="dash-ram">—</span></p>
+          <p><strong>CPU:</strong> <span id="dash-cpu">—</span></p>
+          <p><strong>Unavailable sensors:</strong> <span id="dash-sensors">—</span></p>
+          <p><strong>Recent audit events:</strong> <span id="dash-audit">0</span></p>
         </div>
       </section>
 
@@ -202,6 +209,12 @@
         <h1 id="h-models">Model Library</h1>
         <div class="card">
           <p>Content-addressed `blobs/sha256/` storage. Local import verifies GGUF bounds and SHA-256 before promotion.</p>
+        </div>
+        <div class="card" id="models-live" hidden>
+          <table aria-label="Installed models">
+            <thead><tr><th scope="col">Alias</th><th scope="col">Architecture</th><th scope="col">Quant</th><th scope="col">Context</th><th scope="col">Tools</th></tr></thead>
+            <tbody id="models-tbody"></tbody>
+          </table>
         </div>
       </section>
 
@@ -257,6 +270,57 @@
         if (target) target.classList.add('active');
       });
     });
+
+    // Live view-models from the loopback bridge (`lora-desktop --serve`). In the Tauri shell the
+    // embedded CSP keeps `connect-src 'none'`, so these fetches are blocked and the static
+    // placeholders remain. All values are written with textContent, never innerHTML.
+    const setText = (id, value) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = String(value);
+    };
+    const announce = (msg) => setText('sr-status', msg);
+    const getJson = async (path) => {
+      const res = await fetch(path, { cache: 'no-store', credentials: 'omit' });
+      if (!res.ok) throw new Error(path + ' -> ' + res.status);
+      return res.json();
+    };
+    const loadDashboard = async () => {
+      const vm = await getJson('/api/dashboard');
+      const s = vm.status_strip || {};
+      setText('dest-badge', 'Destination: ' + (s.execution_destination || 'unknown'));
+      setText('model-badge', 'Model: ' + (s.active_model_alias || 'None'));
+      setText('dash-model-count', vm.installed_model_count);
+      setText('dash-ram', vm.available_ram_mib + ' MiB available / ' + vm.total_ram_mib + ' MiB total');
+      setText('dash-cpu', vm.cpu_summary || 'unknown');
+      setText('dash-sensors', (vm.unavailable_sensors || []).join(', ') || 'none');
+      setText('dash-audit', vm.recent_audit_count);
+      if (vm.installed_model_count > 0) {
+        setText('dash-active-model', s.active_model_alias || vm.installed_model_count + ' verified model(s) ready');
+      }
+      document.getElementById('dash-live').hidden = false;
+    };
+    const loadModels = async () => {
+      const models = await getJson('/api/models');
+      const tbody = document.getElementById('models-tbody');
+      tbody.replaceChildren();
+      for (const m of models) {
+        const p = m.probed || {};
+        const row = document.createElement('tr');
+        for (const cell of [m.display_alias, p.architecture, p.quantization, p.context_length, p.supports_tool_calling ? 'yes' : 'no']) {
+          const td = document.createElement('td');
+          td.textContent = cell === undefined || cell === null ? '—' : String(cell);
+          row.appendChild(td);
+        }
+        tbody.appendChild(row);
+      }
+      document.getElementById('models-live').hidden = models.length === 0;
+    };
+    if (location.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)) {
+      Promise.allSettled([loadDashboard(), loadModels()]).then((results) => {
+        const failed = results.filter((r) => r.status === 'rejected').length;
+        announce(failed ? 'Live runtime data partially unavailable.' : 'Live runtime data loaded.');
+      });
+    }
   </script>
 </body>
 </html>

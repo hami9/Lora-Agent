@@ -57,12 +57,23 @@ struct ApiCli {
     /// Maximum number of requests to serve before exiting (0 = unlimited)
     #[arg(long, default_value_t = 0)]
     max_requests: usize,
+
+    /// Automatically approve file read requests within verified workspace scope (for headless test/automation)
+    #[arg(long)]
+    auto_approve: bool,
 }
 
-struct DenyByDefaultApiPrompt;
-impl ApprovalPromptPort for DenyByDefaultApiPrompt {
+struct ConfigurableApiPrompt {
+    auto_approve: bool,
+}
+
+impl ApprovalPromptPort for ConfigurableApiPrompt {
     fn prompt_user(&self, _request: &ApprovalRequest) -> Result<ApprovalDecision, LoraError> {
-        Ok(ApprovalDecision::Deny)
+        if self.auto_approve {
+            Ok(ApprovalDecision::ApproveOnce)
+        } else {
+            Ok(ApprovalDecision::Deny)
+        }
     }
 }
 
@@ -101,7 +112,9 @@ fn main() {
     let file_executor = Arc::new(OsScopedFileExecutor);
     let worker_spawner =
         resolve_default_worker_spawner(cli.worker_bin, cli.worker_backend.as_deref());
-    let approval_ui = Arc::new(DenyByDefaultApiPrompt);
+    let approval_ui = Arc::new(ConfigurableApiPrompt {
+        auto_approve: cli.auto_approve,
+    });
 
     let app = match LoraApplicationService::open(
         &data_dir,
@@ -252,6 +265,197 @@ fn handle_http_connection(
             let body = serde_json::to_string(&matrix).unwrap_or_else(|_| "[]".to_string());
             write_http_response(stream, "200 OK", "application/json", &body)
         }
+        ("POST", "/v1/index") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let scope_str = match req_json.get("scope").and_then(|v| v.as_str()) {
+                Some(s) if !s.trim().is_empty() => s,
+                _ => {
+                    let err = serde_json::json!({
+                        "code": "missing_parameter",
+                        "detail": "missing or empty 'scope' field",
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let files: Vec<String> = match req_json.get("files").and_then(|v| v.as_array()) {
+                Some(arr) if !arr.is_empty() => arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect(),
+                _ => {
+                    let err = serde_json::json!({
+                        "code": "missing_parameter",
+                        "detail": "missing or empty 'files' array",
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let scope_path = PathBuf::from(scope_str);
+            let root = match app.file_executor.register_root(&scope_path) {
+                Ok(r) => r,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            app.policy.register_scoped_root(root.clone());
+            let max_bytes = req_json
+                .get("max_file_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(32 * 1024) as usize;
+            match app.store.index_scoped_files(
+                &root,
+                &files,
+                max_bytes,
+                app.file_executor.as_ref(),
+                &|| Ok(()),
+            ) {
+                Ok(receipt) => {
+                    let body = serde_json::to_string(&receipt).unwrap_or_default();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    )
+                }
+            }
+        }
+        ("POST", "/v1/search") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let scope_str = match req_json.get("scope").and_then(|v| v.as_str()) {
+                Some(s) if !s.trim().is_empty() => s,
+                _ => {
+                    let err = serde_json::json!({
+                        "code": "missing_parameter",
+                        "detail": "missing or empty 'scope' field",
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let query = match req_json.get("query").and_then(|v| v.as_str()) {
+                Some(q) if !q.trim().is_empty() => q,
+                _ => {
+                    let err = serde_json::json!({
+                        "code": "missing_parameter",
+                        "detail": "missing or empty 'query' field",
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let scope_path = PathBuf::from(scope_str);
+            let root = match app.file_executor.register_root(&scope_path) {
+                Ok(r) => r,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            app.policy.register_scoped_root(root.clone());
+            let limit = req_json.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+            match app
+                .store
+                .search_lexical_fts(&root.root_id, query, limit, &app.policy)
+            {
+                Ok(hits) => {
+                    let body = serde_json::to_string(&hits).unwrap_or_default();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    )
+                }
+            }
+        }
         ("POST", "/v1/runs") => {
             let candidate_run_id = format!("run-api-{}", now_epoch_ms());
             let resolved_run_id = if let Some(idem) = idempotency_key.as_deref() {
@@ -302,25 +506,82 @@ fn handle_http_connection(
                             .get("context")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(2048) as u32;
+                        let mode_str = req_json
+                            .get("mode")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("chat");
+                        let use_rag = req_json
+                            .get("use_rag")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let scope_path = req_json
+                            .get("scope")
+                            .and_then(|v| v.as_str())
+                            .map(PathBuf::from);
+
+                        let (mode, workspace_opt) = match mode_str {
+                            "assistant" | "read_only_assistant" => {
+                                (ExecutionMode::ReadOnlyAssistant, scope_path.as_deref())
+                            }
+                            _ => (ExecutionMode::ChatOnly, None),
+                        };
+
+                        let mut limits = AgentLimits::default();
+                        if let Some(lim_obj) = req_json.get("limits") {
+                            if let Some(mtc) =
+                                lim_obj.get("max_tool_calls").and_then(|v| v.as_u64())
+                            {
+                                limits.max_tool_calls = mtc as u32;
+                            }
+                            if let Some(mfb) =
+                                lim_obj.get("max_file_bytes").and_then(|v| v.as_u64())
+                            {
+                                limits.max_file_bytes = mfb as usize;
+                            }
+                            if let Some(dl) =
+                                lim_obj.get("run_deadline_secs").and_then(|v| v.as_u64())
+                            {
+                                limits.run_deadline_secs = dl;
+                            }
+                            if let Some(mot) =
+                                lim_obj.get("max_output_tokens").and_then(|v| v.as_u64())
+                            {
+                                limits.max_output_tokens = mot as u32;
+                            }
+                        }
+
                         let cancel = Arc::new(AtomicBool::new(false));
                         let mut deltas = Vec::new();
-                        match app.run_task(
+                        match app.run_rag_task(
                             &resolved_run_id,
                             principal,
                             model,
                             context,
                             TuningProfile::Automatic,
-                            ExecutionMode::ChatOnly,
-                            None,
+                            mode,
+                            workspace_opt,
                             prompt,
-                            &AgentLimits::default(),
+                            &limits,
+                            use_rag,
                             &cancel,
                             &mut |delta| {
                                 deltas.push(delta.to_string());
                                 Ok(())
                             },
                         ) {
-                            Ok((_plan, outcome)) => {
+                            Ok((plan, outcome)) => {
+                                let plan_data = serde_json::json!({
+                                    "explanation": plan.explanation,
+                                    "weights_bytes": plan.estimate.weights_bytes,
+                                    "kv_cache_bytes": plan.estimate.kv_cache_bytes,
+                                })
+                                .to_string();
+                                let _ = run_mgr.append_event(
+                                    &resolved_run_id,
+                                    "plan_selected",
+                                    &plan_data,
+                                );
+
                                 for chunk in deltas {
                                     let ev_data =
                                         serde_json::json!({ "text_delta": chunk }).to_string();
@@ -330,10 +591,19 @@ fn handle_http_connection(
                                         &ev_data,
                                     );
                                 }
+                                for cit in &outcome.citations {
+                                    let cit_data = serde_json::to_string(cit).unwrap_or_default();
+                                    let _ = run_mgr.append_event(
+                                        &resolved_run_id,
+                                        "citation",
+                                        &cit_data,
+                                    );
+                                }
                                 let done_data = serde_json::json!({
                                     "status": "succeeded",
                                     "answer": outcome.answer,
                                     "turns_used": outcome.turns_used,
+                                    "citations": outcome.citations,
                                 })
                                 .to_string();
                                 let _ = run_mgr.append_event(
