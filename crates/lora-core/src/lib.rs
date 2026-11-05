@@ -133,8 +133,55 @@ pub const TERMINAL_ASCII_BANNER: &str = concat!(
     "           .-+-:.                    .::      .:+-.         \n",
     "          .=-.                         .::      .--:        \n",
     "         .-.                              ..     ..::.      \n",
-    "        ...                                         ..."
+    "        ...                                         ...\n",
+    "\n",
+    "▄▒    ▄▒▀▀░ ▄▒▀▀░  ▄▒▀▀░      ▄▒▀▀░ ▄▒▀▀▀ ▄▒▀▀▀ ▄▒▀▀░  ▀▄▒▀▀\n",
+    "▀▀    ▀▀  ▀ ▀▀ ▀▀  ▀▀  ▀      ▀▀  ▀ ▀▀ ▀▀ ▀▀▀▀  ▀▀  ▀   ▀▀  \n",
+    "░▒▓ ▄ ░▒▓ ▄ ░▒▓ ▄  ░▒▓▀█      ░▒▓▀█ ░▒▓ ▄ ░▒▓ ▄ ░▒▓ ▄   ░▒▓ \n",
+    "▀▀▀▀▀ ▀▀▀▀▀ ▀▀▀ ▀▀ ▀▀▀ ▀      ▀▀▀ ▀ ▀▀▀▀▀ ▀▀▀▀▀ ▀▀▀ ▀▀  ▀▀▀  "
 );
+
+/// Render the terminal ASCII banner with optional ANSI magenta/violet/white styling.
+pub fn render_terminal_banner(use_color: bool) -> String {
+    if !use_color {
+        return TERMINAL_ASCII_BANNER.to_string();
+    }
+    let mut out = String::with_capacity(TERMINAL_ASCII_BANNER.len() + 2048);
+    let lines: Vec<&str> = TERMINAL_ASCII_BANNER.lines().collect();
+    for (idx, line) in lines.iter().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        if idx < 35 {
+            // Emblem in neon violet/magenta
+            out.push_str("\x1b[38;5;135m");
+            out.push_str(line);
+            out.push_str("\x1b[0m");
+        } else if line.is_empty() {
+            continue;
+        } else {
+            // 4-row block typography with pink/magenta/white shading
+            for ch in line.chars() {
+                match ch {
+                    '▄' => out.push_str("\x1b[38;5;207m▄\x1b[0m"),
+                    '▒' => out.push_str("\x1b[38;5;128m▒\x1b[0m"),
+                    '░' => out.push_str("\x1b[38;5;90m░\x1b[0m"),
+                    '▓' => out.push_str("\x1b[97m▓\x1b[0m"),
+                    '█' => out.push_str("\x1b[97m█\x1b[0m"),
+                    '▀' => {
+                        if idx == lines.len() - 1 {
+                            out.push_str("\x1b[97m▀\x1b[0m");
+                        } else {
+                            out.push_str("\x1b[38;5;165m▀\x1b[0m");
+                        }
+                    }
+                    other => out.push(other),
+                }
+            }
+        }
+    }
+    out
+}
 
 // Internal neural-link calibration marker (Night City / Sector C-77).
 #[doc(hidden)]

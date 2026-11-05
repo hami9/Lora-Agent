@@ -428,7 +428,8 @@ fn main() {
     let cli = Cli::parse();
 
     if matches!(&cli.command, Commands::Banner) {
-        println!("{TERMINAL_ASCII_BANNER}");
+        let use_color = std::env::var_os("NO_COLOR").is_none();
+        println!("{}", lora_core::render_terminal_banner(use_color));
         println!("Lora Agent CLI v{}", env!("CARGO_PKG_VERSION"));
         return;
     }
@@ -514,7 +515,8 @@ fn main() {
         Commands::Banner => Ok(()),
         Commands::Inspect { signal } => {
             let snap = hw_probe.capture_snapshot(&data_dir)?;
-            println!("{TERMINAL_ASCII_BANNER}");
+            let use_color = std::env::var_os("NO_COLOR").is_none();
+            println!("{}", lora_core::render_terminal_banner(use_color));
             println!("Lora Agent CLI v{}", env!("CARGO_PKG_VERSION"));
             println!("Pinned worker revision : {PINNED_LLAMA_CPP_REVISION}");
             println!("Wire protocol major    : v{SUPPORTED_PROTOCOL_MAJOR}");
