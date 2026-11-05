@@ -361,7 +361,7 @@ pub fn run_update_and_rollback_drill(
         && rollback_restored_cleanly;
 
     Ok(UpdateRollbackDrillReceipt {
-        from_version: "0.0.9".to_string(),
+        from_version: "0.0.0".to_string(),
         to_version: env!("CARGO_PKG_VERSION").to_string(),
         backup_created,
         upgrade_preserved_models,
