@@ -44,24 +44,23 @@ impl StoreLockPort for OsStoreLockPort {
 
         #[cfg(not(windows))]
         let file = {
-            // Portable fallback for non-Windows targets using exclusive advisory lock file alongside open handle
-            let flag_path = data_dir.join("store.lock.active");
-            match OpenOptions::new()
+            // Exclusive OS advisory lock (flock/fcntl) held by the open handle;
+            // the OS releases it when the handle closes or the process exits.
+            let busy = |e: &dyn std::fmt::Display| {
+                LoraError::StoreBusy(format!(
+                    "failed to acquire exclusive lock on '{}': {e}",
+                    lock_path.display()
+                ))
+            };
+            let f = OpenOptions::new()
+                .read(true)
                 .write(true)
-                .create_new(true)
-                .open(&flag_path)
-            {
-                Ok(mut f) => {
-                    let _ = writeln!(f, "{}", std::process::id());
-                    f
-                }
-                Err(e) => {
-                    return Err(LoraError::StoreBusy(format!(
-                        "failed to acquire exclusive lock on '{}': {e}",
-                        lock_path.display()
-                    )))
-                }
-            }
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)
+                .map_err(|e| busy(&e))?;
+            f.try_lock().map_err(|e| busy(&e))?;
+            f
         };
 
         // Write diagnostic-only PID file

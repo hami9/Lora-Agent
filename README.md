@@ -13,7 +13,7 @@
 ## Key Highlights
 
 - **Local-First & Offline**: Zero network dependencies for model admission, inference, file reading, or audit journaling.
-- **Process-Isolated Native Worker**: Native C/C++ inference kernels (`llama.cpp` pin `c6a0ff11a0fe16ac1a2eb569190934593a2b3670`) execute in a supervised child process communicating over private 32-bit length-prefixed anonymous pipes.
+- **Process-Isolated Native Worker**: Native C/C++ inference kernels (`llama.cpp` pin `7d516e25ead4653169236b3f90d13f7bd8629724`) execute in a supervised child process communicating over private 32-bit length-prefixed anonymous pipes.
 - **Hardware Intelligence Engine (HIE)**: Pressure-aware admission planner evaluates real-time system memory and VRAM to prevent thrashing and out-of-memory crashes before model load.
 - **Default-Deny Policy Gate**: Capability-based security model binding operations to callers, runs, normalized resource scopes, and short-lived epochs.
 - **Untrusted Observation Envelopes**: File contents and tool outputs are strictly isolated as untrusted data inside model context, preventing prompt-injection privilege escalation.

@@ -3,23 +3,258 @@
 //! Exchanges length-prefixed v1 UTF-8 JSON frames over inherited `stdin` and `stdout`.
 //! Never opens listening sockets, shell processes, or credentials (`docs/INFERENCE_ENGINE.md`).
 
-use lora_platform::synthesize_deterministic_response;
+// Pieces used only by the native backend (UTF-8 assembly, decode loop, tool parsing) are still
+// compiled and unit-tested in default builds.
+#![cfg_attr(not(feature = "native-llama-cpp"), allow(dead_code))]
+
+mod backend;
+mod cancel;
+mod cpucheck;
+mod deterministic;
+mod generation;
+#[cfg(feature = "native-llama-cpp")]
+mod native;
+mod toolcall;
+mod utf8;
+
+use backend::{select_backend, BackendChoice};
+use cancel::CancelState;
+use deterministic::DeterministicBackend;
 use lora_protocol::{
     negotiate_version, parse_gguf_bytes, read_host_request, validate_nonce, write_frame_str,
-    write_worker_event, GenerationUsage, HostRequest, ProtocolError, WorkerCapabilities,
-    WorkerErrorCode, WorkerEvent, PINNED_LLAMA_CPP_REVISION,
+    write_worker_event, HostRequest, ProbedModelMetadata, ProtocolError, WorkerCapabilities,
+    WorkerErrorCode, WorkerEvent,
 };
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{self, BufReader, BufWriter};
+use std::io::{self, BufReader, BufWriter, Write};
 use std::path::Path;
+use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
-fn verify_and_parse_gguf(
+/// Parameters of a `LoadModel` request after artifact verification.
+pub struct LoadArgs {
+    pub artifact_id: String,
+    pub artifact_path: String,
+    pub context_length: u32,
+    pub threads: u32,
+    /// `None` when the strict parser could not read the file (native backend only).
+    pub meta: Option<ProbedModelMetadata>,
+}
+
+pub struct LoadedModel {
+    pub handle: String,
+    pub resident_bytes: u64,
+    pub kv_bytes_per_token: u64,
+}
+
+/// Parameters of a `Generate` request.
+pub struct GenerateArgs {
+    pub request_id: String,
+    pub model_handle: String,
+    pub prompt: String,
+    pub max_tokens: u32,
+    pub context_length: u32,
+    pub seed: u64,
+    pub tool_calling_enabled: bool,
+    pub simulated_delay_ms: u64,
+}
+
+enum Backend {
+    Deterministic(DeterministicBackend),
+    #[cfg(feature = "native-llama-cpp")]
+    Native(native::NativeBackend),
+    /// Native was requested but is not compiled in; every load fails.
+    Unavailable,
+    /// Native is compiled in but this CPU lacks required features; every load fails.
+    #[cfg(feature = "native-llama-cpp")]
+    CpuUnsupported(Vec<String>),
+}
+
+impl Backend {
+    fn new(choice: BackendChoice, _cancel: &Arc<CancelState>) -> Self {
+        match choice {
+            BackendChoice::Deterministic => Backend::Deterministic(DeterministicBackend::default()),
+            #[cfg(feature = "native-llama-cpp")]
+            BackendChoice::Native => {
+                // Must run before any llama.cpp code: an unsupported CPU would fault.
+                let missing = cpucheck::missing_native_cpu_features();
+                if missing.is_empty() {
+                    Backend::Native(native::NativeBackend::new(Arc::clone(_cancel)))
+                } else {
+                    Backend::CpuUnsupported(missing)
+                }
+            }
+            #[cfg(not(feature = "native-llama-cpp"))]
+            BackendChoice::Native => Backend::Unavailable,
+            BackendChoice::NativeUnavailable => Backend::Unavailable,
+        }
+    }
+
+    /// (engine_name, engine_revision, build_options) reported in `HelloAck`.
+    fn identity(&self) -> (String, String, Vec<String>) {
+        match self {
+            #[cfg(feature = "native-llama-cpp")]
+            Backend::Native(_) => (
+                "llama.cpp".to_string(),
+                lora_protocol::PINNED_LLAMA_CPP_REVISION.to_string(),
+                option_env!("LORA_LLAMA_BUILD_OPTIONS")
+                    .unwrap_or("cpu")
+                    .split(',')
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            #[cfg(feature = "native-llama-cpp")]
+            Backend::CpuUnsupported(missing) => (
+                "llama.cpp".to_string(),
+                lora_protocol::PINNED_LLAMA_CPP_REVISION.to_string(),
+                vec![format!("cpu-unsupported:missing-{}", missing.join(","))],
+            ),
+            _ => (
+                "lora-deterministic".to_string(),
+                "none".to_string(),
+                vec!["deterministic".to_string()],
+            ),
+        }
+    }
+
+    fn load(&mut self, args: &LoadArgs) -> Result<LoadedModel, (WorkerErrorCode, String)> {
+        match self {
+            Backend::Deterministic(b) => b.load(args),
+            #[cfg(feature = "native-llama-cpp")]
+            Backend::Native(b) => b.load(args),
+            #[cfg(feature = "native-llama-cpp")]
+            Backend::CpuUnsupported(missing) => Err((
+                WorkerErrorCode::UnsupportedCapability,
+                format!(
+                    "this CPU lacks features required by the native llama.cpp build: {}",
+                    missing.join(", ")
+                ),
+            )),
+            Backend::Unavailable => Err((
+                WorkerErrorCode::UnsupportedCapability,
+                "native llama.cpp backend requested but this worker was built without the                  native-llama-cpp feature"
+                    .to_string(),
+            )),
+        }
+    }
+
+    fn accepts_unparsed_metadata(&self) -> bool {
+        match self {
+            #[cfg(feature = "native-llama-cpp")]
+            Backend::Native(_) => true,
+            _ => false,
+        }
+    }
+
+    fn unload(&mut self) {
+        match self {
+            Backend::Deterministic(b) => b.unload(),
+            #[cfg(feature = "native-llama-cpp")]
+            Backend::Native(b) => b.unload(),
+            Backend::Unavailable => {}
+            #[cfg(feature = "native-llama-cpp")]
+            Backend::CpuUnsupported(_) => {}
+        }
+    }
+
+    fn rss_bytes(&self) -> u64 {
+        match self {
+            #[cfg(feature = "native-llama-cpp")]
+            Backend::Native(b) => b.rss_bytes(),
+            _ => 32 * 1024 * 1024,
+        }
+    }
+
+    /// `Err(())` means the host pipe is gone and the worker must exit.
+    fn generate<W: Write>(
+        &mut self,
+        writer: &mut W,
+        fault_mode: &str,
+        g: GenerateArgs,
+    ) -> Result<(), ()> {
+        match self {
+            Backend::Deterministic(b) => b.generate(writer, fault_mode, g),
+            #[cfg(feature = "native-llama-cpp")]
+            Backend::Native(b) => b.generate(writer, g),
+            #[cfg(feature = "native-llama-cpp")]
+            Backend::CpuUnsupported(_) => {
+                let _ = write_worker_event(
+                    writer,
+                    &WorkerEvent::Error {
+                        request_id: Some(g.request_id),
+                        code: WorkerErrorCode::InvalidState,
+                        message: "no model loaded in worker".to_string(),
+                        retryable: false,
+                    },
+                );
+                Ok(())
+            }
+            Backend::Unavailable => {
+                let _ = write_worker_event(
+                    writer,
+                    &WorkerEvent::Error {
+                        request_id: Some(g.request_id),
+                        code: WorkerErrorCode::InvalidState,
+                        message: "no model loaded in worker".to_string(),
+                        retryable: false,
+                    },
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
+enum Incoming {
+    Request(HostRequest),
+    Eof,
+    Error(ProtocolError),
+}
+
+/// Reads frames on a dedicated thread so a `Cancel` can interrupt a generation that is running
+/// on the main thread (`intercept` hands matching cancels to the shared abort flag).
+fn spawn_reader(cancel: Arc<CancelState>, intercept: bool) -> Receiver<Incoming> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        let mut reader = BufReader::new(stdin.lock());
+        loop {
+            let msg = match read_host_request(&mut reader) {
+                Ok(Some(req)) => {
+                    if intercept && cancel.intercept(&req) {
+                        continue;
+                    }
+                    Incoming::Request(req)
+                }
+                Ok(None) => {
+                    cancel.abort();
+                    Incoming::Eof
+                }
+                Err(e) => {
+                    cancel.abort();
+                    Incoming::Error(e)
+                }
+            };
+            let last = !matches!(msg, Incoming::Request(_));
+            if tx.send(msg).is_err() || last {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// Digest failures are fatal (outer error); a metadata parse failure is returned separately so
+/// the native backend can fall back to llama.cpp's own reader (the strict MVP parser does not
+/// understand arrays, floats, etc. found in real GGUF files).
+type VerifiedArtifact = Result<ProbedModelMetadata, String>;
+
+fn verify_artifact(
     path: &str,
     expected_sha256: &str,
-) -> Result<lora_protocol::ProbedModelMetadata, (WorkerErrorCode, String)> {
+) -> Result<VerifiedArtifact, (WorkerErrorCode, String)> {
     let bytes = fs::read(Path::new(path)).map_err(|e| {
         (
             WorkerErrorCode::CorruptArtifact,
@@ -37,17 +272,22 @@ fn verify_and_parse_gguf(
         ));
     }
 
-    let parsed =
-        parse_gguf_bytes(&bytes).map_err(|e| (WorkerErrorCode::CorruptArtifact, e.to_string()))?;
-    Ok(parsed.metadata)
+    Ok(parse_gguf_bytes(&bytes)
+        .map(|p| p.metadata)
+        .map_err(|e| e.to_string()))
+}
+
+fn verify_and_parse_gguf(
+    path: &str,
+    expected_sha256: &str,
+) -> Result<ProbedModelMetadata, (WorkerErrorCode, String)> {
+    verify_artifact(path, expected_sha256)?.map_err(|e| (WorkerErrorCode::CorruptArtifact, e))
 }
 
 fn main() {
     let fault_mode = std::env::var("LORA_WORKER_FAULT").unwrap_or_default();
 
-    let stdin = io::stdin();
     let stdout = io::stdout();
-    let mut reader = BufReader::new(stdin.lock());
     let mut writer = BufWriter::new(stdout.lock());
 
     if fault_mode == "crash_on_boot" {
@@ -58,14 +298,21 @@ fn main() {
         return;
     }
 
+    let choice = select_backend(
+        std::env::var("LORA_WORKER_BACKEND").ok().as_deref(),
+        cfg!(feature = "native-llama-cpp"),
+    );
+    let cancel = CancelState::new();
+    let mut backend = Backend::new(choice, &cancel);
+    let incoming = spawn_reader(Arc::clone(&cancel), choice == BackendChoice::Native);
+
     let mut handshake_completed = false;
-    let mut active_handle: Option<(String, u32)> = None;
 
     loop {
-        let req = match read_host_request(&mut reader) {
-            Ok(Some(r)) => r,
-            Ok(None) => break,
-            Err(ProtocolError::IncompatibleMajor { .. }) => {
+        let req = match incoming.recv() {
+            Ok(Incoming::Request(r)) => r,
+            Ok(Incoming::Eof) | Err(_) => break,
+            Ok(Incoming::Error(ProtocolError::IncompatibleMajor { .. })) => {
                 let _ = write_worker_event(
                     &mut writer,
                     &WorkerEvent::Error {
@@ -77,7 +324,7 @@ fn main() {
                 );
                 break;
             }
-            Err(e) => {
+            Ok(Incoming::Error(e)) => {
                 let _ = write_worker_event(
                     &mut writer,
                     &WorkerEvent::Error {
@@ -109,16 +356,13 @@ fn main() {
                     match negotiate_version(&versions) {
                         Ok(selected_version) => {
                             handshake_completed = true;
+                            let (engine_name, engine_revision, build_options) = backend.identity();
                             let ack = WorkerEvent::HelloAck {
                                 selected_version,
                                 nonce,
-                                engine_name: "llama.cpp".to_string(),
-                                engine_revision: PINNED_LLAMA_CPP_REVISION.to_string(),
-                                build_options: vec![
-                                    "cpu".to_string(),
-                                    "avx2".to_string(),
-                                    "fma".to_string(),
-                                ],
+                                engine_name,
+                                engine_revision,
+                                build_options,
                                 capabilities: WorkerCapabilities::default(),
                             };
                             if write_worker_event(&mut writer, &ack).is_err() {
@@ -202,7 +446,7 @@ fn main() {
                 artifact_path,
                 expected_sha256,
                 context_length,
-                ..
+                threads,
             } => {
                 if fault_mode == "crash_on_load" {
                     std::process::exit(139);
@@ -211,54 +455,51 @@ fn main() {
                     let _ = write_frame_str(&mut writer, "{}");
                     break;
                 }
-                match verify_and_parse_gguf(&artifact_path, &expected_sha256) {
-                    Ok(meta) => {
-                        if context_length > meta.context_length {
-                            let _ = write_worker_event(
-                                &mut writer,
-                                &WorkerEvent::Error {
-                                    request_id: Some(request_id),
-                                    code: WorkerErrorCode::OverContextLimit,
-                                    message: format!(
-                                        "context {context_length} exceeds model limit {}",
-                                        meta.context_length
-                                    ),
-                                    retryable: false,
-                                },
-                            );
-                            continue;
-                        }
-                        let handle = format!("worker-mdl-{artifact_id}");
-                        active_handle = Some((handle.clone(), context_length));
-                        let _ = write_worker_event(
-                            &mut writer,
-                            &WorkerEvent::ModelLoaded {
-                                request_id,
-                                model_handle: handle,
-                                artifact_id,
-                                resident_bytes: meta.total_tensor_bytes,
-                                kv_bytes_per_token: 4096,
-                            },
-                        );
-                    }
-                    Err((code, message)) => {
-                        let _ = write_worker_event(
-                            &mut writer,
-                            &WorkerEvent::Error {
-                                request_id: Some(request_id),
-                                code,
-                                message,
-                                retryable: false,
-                            },
-                        );
-                    }
-                }
+                let verified = verify_artifact(&artifact_path, &expected_sha256).and_then(
+                    |parsed| match parsed {
+                        Ok(meta) if context_length > meta.context_length => Err((
+                            WorkerErrorCode::OverContextLimit,
+                            format!(
+                                "context {context_length} exceeds model limit {}",
+                                meta.context_length
+                            ),
+                        )),
+                        Ok(meta) => Ok(Some(meta)),
+                        Err(_) if backend.accepts_unparsed_metadata() => Ok(None),
+                        Err(e) => Err((WorkerErrorCode::CorruptArtifact, e)),
+                    },
+                );
+                let loaded = verified.and_then(|meta| {
+                    backend.load(&LoadArgs {
+                        artifact_id: artifact_id.clone(),
+                        artifact_path,
+                        context_length,
+                        threads,
+                        meta,
+                    })
+                });
+                let ev = match loaded {
+                    Ok(m) => WorkerEvent::ModelLoaded {
+                        request_id,
+                        model_handle: m.handle,
+                        artifact_id,
+                        resident_bytes: m.resident_bytes,
+                        kv_bytes_per_token: m.kv_bytes_per_token,
+                    },
+                    Err((code, message)) => WorkerEvent::Error {
+                        request_id: Some(request_id),
+                        code,
+                        message,
+                        retryable: false,
+                    },
+                };
+                let _ = write_worker_event(&mut writer, &ev);
             }
             HostRequest::UnloadModel {
                 request_id,
                 model_handle,
             } => {
-                active_handle = None;
+                backend.unload();
                 let _ = write_worker_event(
                     &mut writer,
                     &WorkerEvent::ModelUnloaded {
@@ -271,107 +512,48 @@ fn main() {
                 request_id,
                 model_handle,
                 prompt,
+                max_tokens,
                 context_length,
+                seed,
                 tool_calling_enabled,
                 simulated_delay_ms,
                 ..
             } => {
-                let Some((ref loaded_h, loaded_ctx)) = active_handle else {
-                    let _ = write_worker_event(
-                        &mut writer,
-                        &WorkerEvent::Error {
-                            request_id: Some(request_id),
-                            code: WorkerErrorCode::InvalidState,
-                            message: "no model loaded in worker".to_string(),
-                            retryable: false,
-                        },
-                    );
-                    continue;
-                };
-                if loaded_h != &model_handle {
-                    let _ = write_worker_event(
-                        &mut writer,
-                        &WorkerEvent::Error {
-                            request_id: Some(request_id),
-                            code: WorkerErrorCode::InvalidState,
-                            message: "stale or unknown model_handle".to_string(),
-                            retryable: false,
-                        },
-                    );
-                    continue;
-                }
-                let est_prompt_tokens = ((prompt.len() / 4) + 1) as u32;
-                if est_prompt_tokens > context_length || context_length > loaded_ctx {
-                    let _ = write_worker_event(
-                        &mut writer,
-                        &WorkerEvent::Error {
-                            request_id: Some(request_id),
-                            code: WorkerErrorCode::OverContextLimit,
-                            message: "prompt exceeds configured context window".to_string(),
-                            retryable: false,
-                        },
-                    );
-                    continue;
-                }
-
-                let (chunks, tool_proposal, finish_reason) =
-                    synthesize_deterministic_response(&prompt, tool_calling_enabled);
-
-                let mut seq = 0u64;
-                for chunk in &chunks {
-                    seq += 1;
-                    if simulated_delay_ms > 0 {
-                        thread::sleep(Duration::from_millis(simulated_delay_ms));
-                    }
-                    let ev = WorkerEvent::GenerationDelta {
-                        request_id: request_id.clone(),
-                        sequence: seq,
-                        text_delta: chunk.clone(),
-                        token_count: 1,
-                    };
-                    if write_worker_event(&mut writer, &ev).is_err() {
-                        return;
-                    }
-                    if fault_mode == "crash_mid_decode" && seq == 1 {
-                        std::process::exit(139);
-                    }
-                }
-
-                seq += 1;
-                let done = WorkerEvent::GenerationComplete {
+                let g = GenerateArgs {
                     request_id,
-                    sequence: seq,
-                    finish_reason,
-                    usage: GenerationUsage {
-                        prompt_tokens: est_prompt_tokens,
-                        completion_tokens: chunks.len() as u32,
-                        prefill_ms: 4,
-                        decode_ms: (chunks.len() as u64).saturating_mul(simulated_delay_ms.max(1)),
-                        peak_rss_bytes: 64 * 1024 * 1024,
-                    },
-                    tool_proposal,
+                    model_handle,
+                    prompt,
+                    max_tokens,
+                    context_length,
+                    seed,
+                    tool_calling_enabled,
+                    simulated_delay_ms,
                 };
-                if write_worker_event(&mut writer, &done).is_err() {
+                if backend.generate(&mut writer, &fault_mode, g).is_err() {
                     return;
                 }
             }
             HostRequest::Cancel { request_id, .. } => {
-                let _ = write_worker_event(
-                    &mut writer,
-                    &WorkerEvent::Error {
-                        request_id: Some(request_id),
-                        code: WorkerErrorCode::Cancelled,
-                        message: "cancelled".to_string(),
-                        retryable: false,
-                    },
-                );
+                // Cancels for an in-flight native generation never reach here (the reader thread
+                // consumes them); a stale one is dropped silently so the pipe never desyncs.
+                if choice != BackendChoice::Native {
+                    let _ = write_worker_event(
+                        &mut writer,
+                        &WorkerEvent::Error {
+                            request_id: Some(request_id),
+                            code: WorkerErrorCode::Cancelled,
+                            message: "cancelled".to_string(),
+                            retryable: false,
+                        },
+                    );
+                }
             }
             HostRequest::Ping { request_id } => {
                 let _ = write_worker_event(
                     &mut writer,
                     &WorkerEvent::Pong {
                         request_id,
-                        rss_bytes: 32 * 1024 * 1024,
+                        rss_bytes: backend.rss_bytes(),
                     },
                 );
             }

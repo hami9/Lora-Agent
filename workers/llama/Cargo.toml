@@ -11,8 +11,8 @@ path = "src/main.rs"
 
 [features]
 default = []
-# Optional C-API FFI linkage against the pinned llama.cpp build revision
-native-llama-cpp = []
+# Link the pinned llama.cpp (vendor/llama.cpp submodule) through the C++ shim in native/
+native-llama-cpp = ["dep:sysinfo"]
 
 [dependencies]
 lora-protocol.workspace = true
@@ -21,3 +21,9 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
+sysinfo = { workspace = true, optional = true }
+
+[build-dependencies]
+# Only exercised when the `native-llama-cpp` feature is on (see build.rs); both compile in seconds.
+cc = "1"
+cmake = "0.1"
