@@ -130,7 +130,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "29",
+            "32",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -487,6 +487,66 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r29.starts_with("HTTP/1.1 200 OK"));
     assert!(r29.contains("\"decision\":\"promote_experimental\""));
     assert!(r29.contains("\"job_id\":\"eval-job-001\""));
+
+    // (aa) POST /v1/adapter/dataset-split validates leakage-free source-grouped dataset splits
+    let body_split = serde_json::json!({
+        "license": "Apache-2.0",
+        "examples": [
+            {
+                "example_id": "ex1",
+                "source_group_id": "group_alpha",
+                "prompt": "Prompt A",
+                "target_completion": "Completion A"
+            },
+            {
+                "example_id": "ex2",
+                "source_group_id": "group_beta",
+                "prompt": "Prompt B",
+                "target_completion": "Completion B"
+            },
+            {
+                "example_id": "ex3",
+                "source_group_id": "group_gamma",
+                "prompt": "Prompt C",
+                "target_completion": "Completion C"
+            }
+        ]
+    })
+    .to_string();
+    let r30 = send_http(&format!(
+        "POST /v1/adapter/dataset-split HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_split}",
+        body_split.len()
+    ));
+    assert!(r30.starts_with("HTTP/1.1 200 OK"));
+    assert!(r30.contains("\"dataset_sha256\":"));
+    assert!(r30.contains("\"license\":\"Apache-2.0\""));
+    assert!(r30.contains("\"train_examples\":"));
+    assert!(r30.contains("\"validation_examples\":"));
+    assert!(r30.contains("\"test_examples\":"));
+
+    // (ab) POST /v1/hardware/tune evaluates and stores auto-tuning receipt
+    let body_tune = serde_json::json!({
+        "model_alias": "api-model",
+        "context_length": 2048,
+        "profile": "automatic"
+    })
+    .to_string();
+    let r31 = send_http(&format!(
+        "POST /v1/hardware/tune HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_tune}",
+        body_tune.len()
+    ));
+    assert!(r31.starts_with("HTTP/1.1 200 OK"));
+    assert!(r31.contains("\"optimal_threads\":"));
+    assert!(r31.contains("\"optimal_batch_size\":"));
+    assert!(r31.contains("\"key_digest\":"));
+
+    // (ac) GET /v1/hardware/tuning-receipts lists stored receipts
+    let r32 = send_http(&format!(
+        "GET /v1/hardware/tuning-receipts HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r32.starts_with("HTTP/1.1 200 OK"));
+    assert!(r32.contains("\"key_digest\":"));
+    assert!(r32.contains("\"optimal_threads\":"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());

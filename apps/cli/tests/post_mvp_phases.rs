@@ -1827,3 +1827,128 @@ fn cli_plugins_stage_activate_disable_and_list() {
     let stdout_list = String::from_utf8_lossy(&out_list.stdout);
     assert!(stdout_list.contains("org.cli.formatter v1.0.0 [Disabled]"));
 }
+
+#[test]
+fn cli_tune_calibration_and_list() {
+    use std::process::Command;
+
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().expect("tempdir");
+    let data_dir = tmp.path().join("data");
+    let fixture = tmp.path().join("tune_fixture.gguf");
+    let receipt_path = tmp.path().join("tune_receipt.json");
+
+    let run = |args: &[&str]| {
+        Command::new(lora_bin)
+            .env("LORA_DATA_DIR", &data_dir)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    assert!(run(&["generate-fixture", fixture.to_str().unwrap()])
+        .status
+        .success());
+    assert!(
+        run(&["import", fixture.to_str().unwrap(), "--alias", "tune-model"])
+            .status
+            .success()
+    );
+
+    // 1. Run calibration and export receipt
+    let out_tune = run(&[
+        "tune",
+        "--model",
+        "tune-model",
+        "--context",
+        "2048",
+        "--receipt-out",
+        receipt_path.to_str().unwrap(),
+    ]);
+    assert!(
+        out_tune.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out_tune.stderr)
+    );
+    let stdout_tune = String::from_utf8_lossy(&out_tune.stdout);
+    assert!(stdout_tune.contains("Optimal threads"));
+    assert!(stdout_tune.contains("Optimal batch size"));
+    assert!(receipt_path.exists());
+
+    // 2. List stored tuning receipts
+    let out_list = run(&["tune", "--list"]);
+    assert!(
+        out_list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out_list.stderr)
+    );
+    let stdout_list = String::from_utf8_lossy(&out_list.stdout);
+    assert!(stdout_list.contains("Stored tuning receipts: 1"));
+}
+
+#[test]
+fn cli_adapter_dataset_split_and_export() {
+    use std::process::Command;
+
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().expect("tempdir");
+    let data_dir = tmp.path().join("data");
+    let dataset_path = tmp.path().join("dataset.json");
+    let out_dir = tmp.path().join("splits_out");
+
+    let examples = serde_json::json!([
+        {
+            "example_id": "ex1",
+            "source_group_id": "doc_alpha",
+            "prompt": "Prompt Alpha",
+            "target_completion": "Completion Alpha"
+        },
+        {
+            "example_id": "ex2",
+            "source_group_id": "doc_beta",
+            "prompt": "Prompt Beta",
+            "target_completion": "Completion Beta"
+        },
+        {
+            "example_id": "ex3",
+            "source_group_id": "doc_gamma",
+            "prompt": "Prompt Gamma",
+            "target_completion": "Completion Gamma"
+        }
+    ]);
+    fs::write(
+        &dataset_path,
+        serde_json::to_string_pretty(&examples).unwrap(),
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| {
+        Command::new(lora_bin)
+            .env("LORA_DATA_DIR", &data_dir)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let out = run(&[
+        "adapter",
+        "--dataset",
+        dataset_path.to_str().unwrap(),
+        "--license",
+        "Apache-2.0",
+        "--out-dir",
+        out_dir.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Dataset SHA-256"));
+    assert!(stdout.contains("Splits (tr/va/te): 1/1/1 examples"));
+    assert!(out_dir.join("manifest.json").exists());
+    assert!(out_dir.join("train.json").exists());
+    assert!(out_dir.join("val.json").exists());
+    assert!(out_dir.join("test.json").exists());
+}

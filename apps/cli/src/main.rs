@@ -316,13 +316,19 @@ enum Commands {
     Tune {
         /// Model alias, revision ID, or SHA-256 digest
         #[arg(long)]
-        model: String,
+        model: Option<String>,
         /// Context window length
         #[arg(long, default_value_t = 2048)]
         context: u32,
         /// Scheduling profile
         #[arg(long, value_enum, default_value_t = ProfileArg::Balanced)]
         profile: ProfileArg,
+        /// List stored tuning receipts
+        #[arg(long)]
+        list: bool,
+        /// Optional path to export tuning receipt JSON
+        #[arg(long)]
+        receipt_out: Option<PathBuf>,
     },
 
     /// Validate leakage-free source-grouped dataset split and evaluate Adapter Studio promotion gate (`docs/TRAINING_SYSTEM.md`)
@@ -335,7 +341,10 @@ enum Commands {
         license: String,
         /// Base model alias, revision ID, or SHA-256 digest
         #[arg(long)]
-        base_model: String,
+        base_model: Option<String>,
+        /// Optional directory to export train.json, val.json, test.json, and manifest.json
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
     },
 
     /// Validate an external catalog variant descriptor before resumable download (`docs/MODEL_MANAGEMENT.md`)
@@ -1103,8 +1112,28 @@ fn main() {
             model,
             context,
             profile,
+            list,
+            receipt_out,
         } => {
-            let (manifest, _) = app.registry.resolve_ready_model(&model)?;
+            if list {
+                let receipts = app.store.list_tuning_receipts()?;
+                println!("Stored tuning receipts: {}", receipts.len());
+                for r in receipts {
+                    println!(
+                        "  [{}] threads={} batch={} tok/s_x100={} (aborted={})",
+                        &r.key_digest[..12.min(r.key_digest.len())],
+                        r.optimal_threads,
+                        r.optimal_batch_size,
+                        r.tuned_tok_per_sec_x100,
+                        r.aborted_due_to_pressure_or_thermal,
+                    );
+                }
+                return Ok(());
+            }
+            let model_name = model.ok_or_else(|| {
+                LoraError::MalformedArtifact("--model is required when calibrating".to_string())
+            })?;
+            let (manifest, _) = app.registry.resolve_ready_model(&model_name)?;
             let snap = hw_probe.capture_snapshot(&data_dir)?;
             let sha = manifest
                 .files
@@ -1157,47 +1186,40 @@ fn main() {
                 "Aborted (thermal) : {}",
                 receipt.aborted_due_to_pressure_or_thermal
             );
+            if let Some(out_p) = receipt_out {
+                let json = serde_json::to_string_pretty(&receipt)
+                    .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
+                std::fs::write(&out_p, json)?;
+                println!("Receipt exported  : {}", out_p.display());
+            }
             Ok(())
         }
         Commands::Adapter {
             dataset,
             license,
             base_model,
+            out_dir,
         } => {
-            let (manifest, _) = app.registry.resolve_ready_model(&base_model)?;
-            let base_sha = manifest
-                .files
-                .first()
-                .map(|f| f.sha256.clone())
-                .unwrap_or_default();
             let raw = std::fs::read_to_string(&dataset)?;
             let examples: Vec<TrainingExample> = serde_json::from_str(&raw)
                 .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
             let split = prepare_leakage_free_splits(&examples, &license)?;
-            let job = LoraJobConfig {
-                job_id: format!("job-{}", now_epoch_ms()),
-                base_model_sha256: base_sha.clone(),
-                tokenizer_template_sha256: manifest.probed.template_digest.clone(),
-                dataset_sha256: split.dataset_sha256.clone(),
-                rank: 16,
-                alpha: 32,
-                target_modules: vec!["q_proj".to_string(), "v_proj".to_string()],
-                epochs: 3,
-                context_length: manifest.probed.context_length.min(2048),
-                microbatch_size: 4,
-                seed: 42,
-            };
-            let outcome = evaluate_adapter_promotion_gate(
-                &job,
-                &base_sha,
-                HeldOutEvaluationReceipt {
-                    base_task_score_pct: 72,
-                    adapter_task_score_pct: 86,
-                    general_regression_pct: 0,
-                    schema_valid_pct: 100,
-                    target_runtime_load_verified: true,
-                },
-            )?;
+            if let Some(out) = out_dir {
+                std::fs::create_dir_all(&out)?;
+                let m_json = serde_json::to_string_pretty(&split)
+                    .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
+                std::fs::write(out.join("manifest.json"), m_json)?;
+                let tr_json = serde_json::to_string_pretty(&split.train_examples)
+                    .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
+                std::fs::write(out.join("train.json"), tr_json)?;
+                let val_json = serde_json::to_string_pretty(&split.validation_examples)
+                    .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
+                std::fs::write(out.join("val.json"), val_json)?;
+                let te_json = serde_json::to_string_pretty(&split.test_examples)
+                    .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
+                std::fs::write(out.join("test.json"), te_json)?;
+                println!("Exported splits to: {}", out.display());
+            }
             println!("Dataset SHA-256  : {}", split.dataset_sha256);
             println!(
                 "Splits (tr/va/te): {}/{}/{} examples",
@@ -1205,10 +1227,43 @@ fn main() {
                 split.validation_examples.len(),
                 split.test_examples.len()
             );
-            println!(
-                "Promotion gate   : {:?} ({})",
-                outcome.decision, outcome.reason
-            );
+
+            if let Some(ref bm) = base_model {
+                let (manifest, _) = app.registry.resolve_ready_model(bm)?;
+                let base_sha = manifest
+                    .files
+                    .first()
+                    .map(|f| f.sha256.clone())
+                    .unwrap_or_default();
+                let job = LoraJobConfig {
+                    job_id: format!("job-{}", now_epoch_ms()),
+                    base_model_sha256: base_sha.clone(),
+                    tokenizer_template_sha256: manifest.probed.template_digest.clone(),
+                    dataset_sha256: split.dataset_sha256.clone(),
+                    rank: 16,
+                    alpha: 32,
+                    target_modules: vec!["q_proj".to_string(), "v_proj".to_string()],
+                    epochs: 3,
+                    context_length: manifest.probed.context_length.min(2048),
+                    microbatch_size: 4,
+                    seed: 42,
+                };
+                let outcome = evaluate_adapter_promotion_gate(
+                    &job,
+                    &base_sha,
+                    HeldOutEvaluationReceipt {
+                        base_task_score_pct: 72,
+                        adapter_task_score_pct: 86,
+                        general_regression_pct: 0,
+                        schema_valid_pct: 100,
+                        target_runtime_load_verified: true,
+                    },
+                )?;
+                println!(
+                    "Promotion gate   : {:?} ({})",
+                    outcome.decision, outcome.reason
+                );
+            }
             Ok(())
         }
         Commands::Catalog { descriptor } => {

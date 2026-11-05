@@ -223,6 +223,12 @@
         <div class="card">
           <p>Admission formula (`weights + kv_cache + runtime_scratch &lt;= available_budget - safety_reserve`) and bounded auto-tuning receipts.</p>
         </div>
+        <div class="card" id="tuning-live" hidden>
+          <table aria-label="Hardware auto-tuning receipts">
+            <thead><tr><th scope="col">Key Digest</th><th scope="col">Threads</th><th scope="col">Batch Size</th><th scope="col">Throughput (x100)</th><th scope="col">Status</th></tr></thead>
+            <tbody id="tuning-tbody"></tbody>
+          </table>
+        </div>
       </section>
 
       <section id="screen-adapter-studio" class="screen" aria-labelledby="h-adapter">
@@ -337,8 +343,23 @@
       }
       document.getElementById('plugins-live').hidden = plugins.length === 0;
     };
+    const loadTuning = async () => {
+      const receipts = await getJson('/api/tuning');
+      const tbody = document.getElementById('tuning-tbody');
+      tbody.replaceChildren();
+      for (const r of receipts) {
+        const row = document.createElement('tr');
+        for (const cell of [r.key_digest ? r.key_digest.slice(0, 12) : '—', r.optimal_threads, r.optimal_batch_size, r.tuned_tok_per_sec_x100, r.aborted_due_to_pressure_or_thermal ? 'aborted' : 'optimal']) {
+          const td = document.createElement('td');
+          td.textContent = cell === undefined || cell === null ? '—' : String(cell);
+          row.appendChild(td);
+        }
+        tbody.appendChild(row);
+      }
+      document.getElementById('tuning-live').hidden = receipts.length === 0;
+    };
     if (location.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)) {
-      Promise.allSettled([loadDashboard(), loadModels(), loadPlugins()]).then((results) => {
+      Promise.allSettled([loadDashboard(), loadModels(), loadPlugins(), loadTuning()]).then((results) => {
         const failed = results.filter((r) => r.status === 'rejected').length;
         announce(failed ? 'Live runtime data partially unavailable.' : 'Live runtime data loaded.');
       });

@@ -169,6 +169,13 @@ fn route_request(
                 &format!("{:?}", e.reason_code()),
             ),
         },
+        "/api/tuning" => match app.store.list_tuning_receipts() {
+            Ok(receipts) => HttpResponse::json(&receipts),
+            Err(e) => HttpResponse::error(
+                "500 Internal Server Error",
+                &format!("{:?}", e.reason_code()),
+            ),
+        },
         "/api/risk-matrix" => HttpResponse::json(&default_risk_register_matrix()),
         "/api/hardware" => match app.hw_probe.capture_snapshot(data_dir) {
             Ok(snap) => HttpResponse::json(&snap),

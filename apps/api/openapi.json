@@ -233,6 +233,42 @@
           }
         }
       }
+    },
+    "/v1/adapter/dataset-split": {
+      "post": {
+        "summary": "Validate and split training dataset by source group without cross-split leakage",
+        "responses": {
+          "200": {
+            "description": "DatasetSplitManifest with non-overlapping train/val/test splits"
+          },
+          "400": {
+            "description": "Malformed dataset or insufficient distinct source groups"
+          }
+        }
+      }
+    },
+    "/v1/hardware/tune": {
+      "post": {
+        "summary": "Run bounded auto-tuning calibration grid and persist verified tuning receipt",
+        "responses": {
+          "200": {
+            "description": "TuningReceipt with optimal thread/batch parameters"
+          },
+          "400": {
+            "description": "Malformed request"
+          }
+        }
+      }
+    },
+    "/v1/hardware/tuning-receipts": {
+      "get": {
+        "summary": "List stored Hardware Intelligence tuning receipts",
+        "responses": {
+          "200": {
+            "description": "Array of TuningReceipt records"
+          }
+        }
+      }
     }
   }
 }

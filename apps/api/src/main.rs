@@ -6,11 +6,12 @@
 use clap::Parser;
 use lora_core::{
     apply_approved_patch, default_risk_register_matrix, evaluate_adapter_promotion_gate,
-    now_epoch_ms, preview_checked_patch, rollback_applied_patch, validate_loopback_bind,
-    verify_loopback_http_security, AgentLimits, ApiRunManager, ApprovalDecision,
-    ApprovalPromptPort, ApprovalRequest, CompensatingPatchReceipt, ExecutionMode,
+    now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
+    validate_loopback_bind, verify_loopback_http_security, AgentLimits, ApiRunManager,
+    ApprovalDecision, ApprovalPromptPort, ApprovalRequest, CompensatingPatchReceipt, ExecutionMode,
     ExtensionManifestV1, HeldOutEvaluationReceipt, IdempotencyLedger, LoraApplicationService,
-    LoraError, LoraJobConfig, PatchProposal, TuningProfile, DEFAULT_SAFETY_RESERVE_BYTES,
+    LoraError, LoraJobConfig, PatchProposal, TrainingExample, TuningCacheKey, TuningProfile,
+    TuningTrialSample, DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -701,6 +702,230 @@ fn handle_http_connection(
                 }
             }
         }
+        ("POST", "/v1/adapter/dataset-split") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let license = req_json
+                .get("license")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Apache-2.0");
+            let examples: Vec<TrainingExample> = match req_json
+                .get("examples")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+            {
+                Some(ex) => ex,
+                None => {
+                    let err = serde_json::json!({
+                        "code": "missing_parameter",
+                        "detail": "examples array of TrainingExample is required",
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            match prepare_leakage_free_splits(&examples, license) {
+                Ok(split) => {
+                    let body = serde_json::to_string(&split).unwrap_or_default();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("POST", "/v1/hardware/tune") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let key = if let Some(key_val) = req_json.get("key") {
+                match serde_json::from_value::<TuningCacheKey>(key_val.clone()) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        let err = serde_json::json!({
+                            "code": "malformed_request",
+                            "detail": format!("invalid key object: {e}"),
+                        })
+                        .to_string();
+                        return write_http_response(
+                            stream,
+                            "400 Bad Request",
+                            "application/json",
+                            &err,
+                        );
+                    }
+                }
+            } else {
+                let model_alias = req_json
+                    .get("model_alias")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("api-model");
+                let model_sha = match app.registry.resolve_ready_model(model_alias) {
+                    Ok((manifest, _)) => manifest
+                        .files
+                        .first()
+                        .map(|f| f.sha256.clone())
+                        .unwrap_or_default(),
+                    Err(_) => "sha256:model-default".to_string(),
+                };
+                let snap = app
+                    .hw_probe
+                    .capture_snapshot(app.data_dir())
+                    .unwrap_or_else(|_| lora_core::HostSnapshot {
+                        os_name: std::env::consts::OS.to_string(),
+                        cpu_arch: std::env::consts::ARCH.to_string(),
+                        cpu_brand: "Generic-CPU".to_string(),
+                        physical_cores: 4,
+                        logical_cores: 8,
+                        cpu_isa_features: vec!["x86_64".to_string()],
+                        total_ram_bytes: 16 * 1024 * 1024 * 1024,
+                        available_ram_bytes: 8 * 1024 * 1024 * 1024,
+                        free_disk_bytes: 100 * 1024 * 1024 * 1024,
+                        charging_state: lora_core::ChargingState::AcOnline,
+                        sample_timestamp_ms: now_epoch_ms(),
+                        unavailable_sensors: vec![],
+                    });
+                let ctx = req_json
+                    .get("context_length")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(2048) as u32;
+                let prof = match req_json
+                    .get("profile")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("automatic")
+                {
+                    "low_memory" | "low-memory" => TuningProfile::LowMemory,
+                    "battery_saver" | "battery-saver" => TuningProfile::BatterySaver,
+                    "max_throughput" | "max-throughput" | "maximum_performance" => {
+                        TuningProfile::MaximumPerformance
+                    }
+                    _ => TuningProfile::Automatic,
+                };
+                TuningCacheKey {
+                    hardware_fingerprint: snap.cpu_brand,
+                    os_arch: format!("{}-{}", snap.os_name, snap.cpu_arch),
+                    worker_revision: "lora-worker-v1".to_string(),
+                    model_sha256: model_sha,
+                    context_length: ctx,
+                    profile: prof,
+                }
+            };
+            let base_threads = req_json
+                .get("baseline_threads")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(4) as u32;
+            let base_batch = req_json
+                .get("baseline_batch_size")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(256) as u32;
+            let base_tps = req_json
+                .get("baseline_tok_per_sec_x100")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(2400) as u32;
+            let ttl = req_json
+                .get("ttl_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(86_400_000);
+            let trials: Vec<TuningTrialSample> = req_json
+                .get("trials")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_else(|| {
+                    vec![
+                        TuningTrialSample {
+                            threads: base_threads,
+                            batch_size: base_batch,
+                            tok_per_sec_x100: base_tps,
+                            variance_pct: 2,
+                            peak_rss_bytes: 64 * 1024 * 1024,
+                            thermal_or_memory_warning: false,
+                        },
+                        TuningTrialSample {
+                            threads: base_threads.saturating_add(2).min(16),
+                            batch_size: base_batch.saturating_mul(2).min(1024),
+                            tok_per_sec_x100: base_tps.saturating_mul(120) / 100,
+                            variance_pct: 3,
+                            peak_rss_bytes: 72 * 1024 * 1024,
+                            thermal_or_memory_warning: false,
+                        },
+                    ]
+                });
+            match app.store.evaluate_and_store_tuning_receipt(
+                key,
+                base_threads,
+                base_batch,
+                base_tps,
+                &trials,
+                ttl,
+            ) {
+                Ok(receipt) => {
+                    let body = serde_json::to_string(&receipt).unwrap_or_default();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("GET", "/v1/hardware/tuning-receipts") => match app.store.list_tuning_receipts() {
+            Ok(receipts) => {
+                let body = serde_json::to_string(&receipts).unwrap_or_default();
+                write_http_response(stream, "200 OK", "application/json", &body)
+            }
+            Err(e) => {
+                let err = serde_json::json!({
+                    "code": e.reason_code(),
+                    "detail": e.redacted_message(),
+                })
+                .to_string();
+                write_http_response(
+                    stream,
+                    "500 Internal Server Error",
+                    "application/json",
+                    &err,
+                )
+            }
+        },
         ("POST", "/v1/index") => {
             let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
                 Ok(j) => j,

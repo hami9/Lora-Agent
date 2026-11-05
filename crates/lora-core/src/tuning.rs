@@ -187,4 +187,21 @@ impl SqliteStore {
             serde_json::from_str(&json).map_err(|e| LoraError::Database(e.to_string()))?;
         Ok(Some(parsed))
     }
+
+    /// List all persisted tuning receipts.
+    pub fn list_tuning_receipts(&self) -> Result<Vec<TuningReceipt>, LoraError> {
+        self.ensure_tuning_schema()?;
+        let conn = self.conn_lock();
+        let mut stmt =
+            conn.prepare("SELECT receipt_json FROM tuning_receipts ORDER BY expires_at_ms DESC")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut receipts = Vec::new();
+        for r in rows {
+            let json = r?;
+            if let Ok(rec) = serde_json::from_str::<TuningReceipt>(&json) {
+                receipts.push(rec);
+            }
+        }
+        Ok(receipts)
+    }
 }

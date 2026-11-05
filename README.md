@@ -26,7 +26,7 @@
 ## Workspace Architecture
 
 ```text
-├── Cargo.toml                  # Workspace root (version = "0.1.5")
+├── Cargo.toml                  # Workspace root (version = "0.1.6")
 ├── crates/
 │   ├── lora-protocol/          # v1 32-bit BE JSON framing, closed schemas & streaming GGUF v2/v3 parser
 │   ├── lora-core/              # App service, SQLite store, registry, HIE, policy gate & RAG
@@ -134,12 +134,19 @@ lora plugins --activate org.example.plugin --grant "fs.read"
 lora plugins --disable org.example.plugin
 lora plugins
 
-# 12. Serve the desktop UI and read-only JSON view-models on loopback only
+# 12. Run bounded HIE thread/batch auto-tuning calibration and inspect receipts
+lora tune --model my-model --context 2048 --receipt-out ./tune_receipt.json
+lora tune --list
+
+# 13. Validate leakage-free source-grouped dataset splits and evaluate Adapter Studio promotion gate
+lora adapter --dataset ./dataset.json --license Apache-2.0 --out-dir ./splits_out --base-model my-model
+
+# 14. Serve the desktop UI and read-only JSON view-models on loopback only
 lora-desktop --serve 127.0.0.1:8765
 
-# 13. Run the authenticated loopback REST/SSE API (127.0.0.1 / [::1] only)
+# 15. Run the authenticated loopback REST/SSE API (127.0.0.1 / [::1] only)
 lora-api --bind 127.0.0.1:8421 --token "$LORA_API_TOKEN"
-# Endpoints: /v1/health, /v1/capabilities, /v1/models, /v1/runs, /v1/runs/{id}/events, /v1/index, /v1/search, /v1/patch/preview, /v1/patch/apply, /v1/patch/rollback, /v1/plugins, /v1/plugins/stage, /v1/plugins/{id}/activate, /v1/plugins/{id}/disable, /v1/plugins/{id}/fault, /v1/plugins/{id}/rollback, /v1/adapter/evaluate
+# Endpoints: /v1/health, /v1/capabilities, /v1/models, /v1/runs, /v1/runs/{id}/events, /v1/index, /v1/search, /v1/patch/preview, /v1/patch/apply, /v1/patch/rollback, /v1/plugins, /v1/plugins/stage, /v1/plugins/{id}/activate, /v1/plugins/{id}/disable, /v1/plugins/{id}/fault, /v1/plugins/{id}/rollback, /v1/adapter/evaluate, /v1/adapter/dataset-split, /v1/hardware/tune, /v1/hardware/tuning-receipts
 ```
 
 ---
