@@ -2065,4 +2065,27 @@ fn cli_catalog_context_budget_and_broker_execution() {
     let stdout_broker = String::from_utf8_lossy(&out_broker.stdout);
     assert!(stdout_broker.contains("Broker service : lora-local-service"));
     assert!(stdout_broker.contains("Status         : Completed"));
+
+    // 4. Model format compatibility matrix classification via CLI
+    let out_compat = run(&["compatibility", "--filename", "qwen-3b-q4_k_m.gguf"]);
+    assert!(out_compat.status.success());
+    let stdout_compat = String::from_utf8_lossy(&out_compat.stdout);
+    assert!(stdout_compat.contains("Artifact   : qwen-3b-q4_k_m.gguf"));
+    assert!(stdout_compat.contains("Supported  : true"));
+
+    // 5. Specialist sub-agent delegation handoff verification via CLI
+    let out_handoff = run(&[
+        "handoff-check",
+        "--parent-run",
+        "run-parent-42",
+        "--child-run",
+        "run-child-43",
+        "--depth",
+        "1",
+        "--max-depth",
+        "2",
+    ]);
+    assert!(out_handoff.status.success());
+    let stdout_handoff = String::from_utf8_lossy(&out_handoff.stdout);
+    assert!(stdout_handoff.contains("Specialist handoff verified: run-parent-42 -> run-child-43"));
 }

@@ -364,6 +364,42 @@
           }
         }
       }
+    },
+    "/v1/doctor": {
+      "get": {
+        "summary": "Holistic system doctor diagnostics covering store locks, SQLite, hardware sensors, and reconciliation",
+        "responses": {
+          "200": {
+            "description": "System health and diagnostic report"
+          }
+        }
+      }
+    },
+    "/v1/models/classify": {
+      "post": {
+        "summary": "Classify candidate model filename against GGUF text-model compatibility matrix",
+        "responses": {
+          "200": {
+            "description": "Compatible single-file GGUF text model"
+          },
+          "400": {
+            "description": "Incompatible model (safetensors, ONNX, mmproj, sharded, or LoRA adapter)"
+          }
+        }
+      }
+    },
+    "/v1/agent/handoff": {
+      "post": {
+        "summary": "Validate specialist sub-agent delegation envelope, depth bounds, root containment, and cycle avoidance",
+        "responses": {
+          "200": {
+            "description": "Specialist handoff envelope verified and admitted"
+          },
+          "400": {
+            "description": "Cycle detected, depth exceeded, budget exhausted, or root escalation attempt"
+          }
+        }
+      }
     }
   }
 }

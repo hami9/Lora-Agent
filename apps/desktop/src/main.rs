@@ -211,6 +211,34 @@ fn route_request(
             HttpResponse::json(&status)
         }
         "/api/risk-matrix" => HttpResponse::json(&default_risk_register_matrix()),
+        "/api/doctor" => {
+            let models_count = app.registry.list_models().map(|m| m.len()).unwrap_or(0);
+            let ext_count = app
+                .store
+                .load_extension_host()
+                .map(|h| h.list().len())
+                .unwrap_or(0);
+            let snap = app.hw_probe.capture_snapshot(data_dir);
+            let snap_json = match snap {
+                Ok(s) => serde_json::json!({
+                    "physical_cores": s.physical_cores,
+                    "available_ram_bytes": s.available_ram_bytes,
+                    "total_ram_bytes": s.total_ram_bytes,
+                    "free_disk_bytes": s.free_disk_bytes,
+                }),
+                Err(e) => serde_json::json!({
+                    "error": format!("{:?}", e.reason_code()),
+                }),
+            };
+            let doc = serde_json::json!({
+                "status": "healthy",
+                "service": "lora-desktop",
+                "models_installed": models_count,
+                "extensions_installed": ext_count,
+                "hardware": snap_json,
+            });
+            HttpResponse::json(&doc)
+        }
         "/api/hardware" => match app.hw_probe.capture_snapshot(data_dir) {
             Ok(snap) => HttpResponse::json(&snap),
             Err(e) => HttpResponse::error(

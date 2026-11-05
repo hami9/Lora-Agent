@@ -5,15 +5,16 @@
 
 use clap::Parser;
 use lora_core::{
-    allocate_context_budget, apply_approved_patch, default_risk_register_matrix,
-    evaluate_adapter_promotion_gate, now_epoch_ms, prepare_leakage_free_splits,
-    preview_checked_patch, rollback_applied_patch, validate_catalog_variant,
-    validate_loopback_bind, verify_egress_permit, verify_loopback_http_security, AgentLimits,
-    ApiRunManager, ApprovalDecision, ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit,
+    allocate_context_budget, apply_approved_patch, classify_artifact_compatibility,
+    default_risk_register_matrix, evaluate_adapter_promotion_gate, now_epoch_ms,
+    prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
+    validate_catalog_variant, validate_loopback_bind, validate_specialist_handoff,
+    verify_egress_permit, verify_loopback_http_security, AgentLimits, ApiRunManager,
+    ApprovalDecision, ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit,
     CatalogVariantDescriptor, CompensatingPatchReceipt, ContextBudgetRequest, EgressConsentPreview,
     EgressPermit, ExecutionMode, ExtensionManifestV1, HeldOutEvaluationReceipt, IdempotencyLedger,
     LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
-    TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
+    SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
     DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
@@ -165,6 +166,7 @@ fn main() {
             &mut ledger,
             &mut run_mgr,
             &mut broker_gate,
+            &data_dir,
         );
         served += 1;
         if cli.once || (cli.max_requests > 0 && served >= cli.max_requests) {
@@ -195,6 +197,7 @@ fn handle_http_connection(
     ledger: &mut IdempotencyLedger,
     run_mgr: &mut ApiRunManager,
     broker_gate: &mut PrivilegedBrokerGate,
+    data_dir: &std::path::Path,
 ) -> Result<(), LoraError> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
@@ -282,6 +285,42 @@ fn handle_http_connection(
         ("GET", "/v1/health") => {
             let body = r#"{"status":"ok","service":"lora-api","api_version":1}"#;
             write_http_response(stream, "200 OK", "application/json", body)
+        }
+        ("GET", "/v1/doctor") => {
+            let models_count = app.registry.list_models().map(|m| m.len()).unwrap_or(0);
+            let ext_count = app
+                .store
+                .load_extension_host()
+                .map(|h| h.list().len())
+                .unwrap_or(0);
+            let snap = app.hw_probe.capture_snapshot(data_dir);
+            let snap_json = match snap {
+                Ok(s) => serde_json::json!({
+                    "physical_cores": s.physical_cores,
+                    "available_ram_bytes": s.available_ram_bytes,
+                    "total_ram_bytes": s.total_ram_bytes,
+                    "free_disk_bytes": s.free_disk_bytes,
+                }),
+                Err(e) => serde_json::json!({
+                    "error": e.reason_code(),
+                }),
+            };
+            let body = serde_json::json!({
+                "status": "healthy",
+                "service": "lora-api",
+                "api_version": 1,
+                "store_lock": "acquired_cleanly",
+                "planner_busy": app.planner.is_busy(),
+                "models_installed": models_count,
+                "extensions_installed": ext_count,
+                "reconciliation": {
+                    "interrupted_runs": app.reconciliation.interrupted_runs.len(),
+                    "cleaned_staging_files": app.reconciliation.cleaned_staging_files,
+                },
+                "hardware": snap_json,
+            })
+            .to_string();
+            write_http_response(stream, "200 OK", "application/json", &body)
         }
         ("GET", "/v1/capabilities") => {
             let caps = run_mgr.capabilities_for(principal);
@@ -1329,6 +1368,126 @@ fn handle_http_connection(
                         "status": status,
                         "permit_id": permit.permit_id,
                         "valid": true,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("POST", "/v1/models/classify") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+
+            let filename = match req_json.get("filename").and_then(|v| v.as_str()) {
+                Some(f) if !f.trim().is_empty() => f.trim(),
+                _ => {
+                    let err = serde_json::json!({
+                        "code": "missing_parameter",
+                        "detail": "non-empty 'filename' field is required",
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+
+            match classify_artifact_compatibility(filename) {
+                Ok(()) => {
+                    let body = serde_json::json!({
+                        "status": "compatible",
+                        "filename": filename,
+                        "artifact_class": "single_file_gguf_text",
+                        "supported": true,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                        "supported": false,
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("POST", "/v1/agent/handoff") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+
+            let envelope: SpecialistHandoffEnvelope =
+                match serde_json::from_value(if req_json.get("handoff").is_some() {
+                    req_json["handoff"].clone()
+                } else {
+                    req_json.clone()
+                }) {
+                    Ok(env) => env,
+                    Err(e) => {
+                        let err = serde_json::json!({
+                            "code": "malformed_request",
+                            "detail": format!("invalid handoff envelope: {e}"),
+                        })
+                        .to_string();
+                        return write_http_response(
+                            stream,
+                            "400 Bad Request",
+                            "application/json",
+                            &err,
+                        );
+                    }
+                };
+
+            match validate_specialist_handoff(&envelope) {
+                Ok(()) => {
+                    let body = serde_json::json!({
+                        "status": "verified",
+                        "parent_run_id": envelope.parent_run_id,
+                        "child_run_id": envelope.child_run_id,
+                        "depth": envelope.depth,
+                        "max_depth": envelope.max_depth,
+                        "admitted": true,
                     })
                     .to_string();
                     write_http_response(stream, "200 OK", "application/json", &body)

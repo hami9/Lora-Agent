@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 publish = false
 repository = "https://github.com/hami9/Lora-Agent"

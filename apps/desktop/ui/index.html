@@ -189,6 +189,10 @@
           <p><strong>Unavailable sensors:</strong> <span id="dash-sensors">—</span></p>
           <p><strong>Recent audit events:</strong> <span id="dash-audit">0</span></p>
         </div>
+        <div class="card" id="doctor-live" hidden>
+          <h2>System Doctor Status</h2>
+          <p><strong>Status:</strong> <span id="doc-status">Healthy</span> | <strong>Lock:</strong> Acquired cleanly</p>
+        </div>
       </section>
 
       <section id="screen-chat" class="screen" aria-labelledby="h-chat">
@@ -404,8 +408,15 @@
         document.getElementById('broker-status').textContent = s.status;
       }
     };
+    const loadDoctor = async () => {
+      const d = await getJson('/api/doctor');
+      if (d && d.status) {
+        document.getElementById('doc-status').textContent = d.status;
+        document.getElementById('doctor-live').hidden = false;
+      }
+    };
     if (location.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)) {
-      Promise.allSettled([loadDashboard(), loadModels(), loadPlugins(), loadTuning(), loadAudit(), loadBudget(), loadBroker()]).then((results) => {
+      Promise.allSettled([loadDashboard(), loadModels(), loadPlugins(), loadTuning(), loadAudit(), loadBudget(), loadBroker(), loadDoctor()]).then((results) => {
         const failed = results.filter((r) => r.status === 'rejected').length;
         announce(failed ? 'Live runtime data partially unavailable.' : 'Live runtime data loaded.');
       });

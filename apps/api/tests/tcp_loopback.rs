@@ -34,6 +34,9 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(openapi_str.contains("\"/v1/catalog/validate\""));
     assert!(openapi_str.contains("\"/v1/context-budget\""));
     assert!(openapi_str.contains("\"/v1/broker/validate\""));
+    assert!(openapi_str.contains("\"/v1/doctor\""));
+    assert!(openapi_str.contains("\"/v1/models/classify\""));
+    assert!(openapi_str.contains("\"/v1/agent/handoff\""));
 
     // 2. Spawn live `lora-api --once` on loopback port and send authenticated GET /v1/capabilities
     let bind_addr = find_free_loopback_addr();
@@ -75,6 +78,9 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(resp.contains("\"catalog.validate\""));
     assert!(resp.contains("\"context_budget.evaluate\""));
     assert!(resp.contains("\"broker.validate\""));
+    assert!(resp.contains("\"agent.handoff\""));
+    assert!(resp.contains("\"models.classify\""));
+    assert!(resp.contains("\"system.doctor\""));
 
     // 3. Import a synthetic GGUF fixture into the store so we can test live execution over TCP
     {
@@ -136,7 +142,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "43",
+            "48",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -749,6 +755,91 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r43.starts_with("HTTP/1.1 400 Bad Request"));
     assert!(r43.contains("policy_denied"));
     assert!(r43.contains("replay detected"));
+
+    // (ao) GET /v1/doctor returns holistic system health and diagnostic report
+    let r44 = send_http(&format!(
+        "GET /v1/doctor HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r44.starts_with("HTTP/1.1 200 OK"));
+    assert!(r44.contains("\"status\":\"healthy\""));
+    assert!(r44.contains("\"store_lock\":\"acquired_cleanly\""));
+    assert!(r44.contains("physical_cores"));
+
+    // (ap) POST /v1/models/classify classifies valid GGUF text model as compatible
+    let body_classify_ok = serde_json::json!({
+        "filename": "qwen2.5-coder-7b-q4_k_m.gguf"
+    })
+    .to_string();
+    let r45 = send_http(&format!(
+        "POST /v1/models/classify HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_classify_ok}",
+        body_classify_ok.len()
+    ));
+    assert!(r45.starts_with("HTTP/1.1 200 OK"));
+    assert!(r45.contains("\"status\":\"compatible\""));
+    assert!(r45.contains("\"supported\":true"));
+
+    // (aq) POST /v1/models/classify rejects incompatible model formats
+    let body_classify_bad = serde_json::json!({
+        "filename": "model.safetensors"
+    })
+    .to_string();
+    let r46 = send_http(&format!(
+        "POST /v1/models/classify HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_classify_bad}",
+        body_classify_bad.len()
+    ));
+    assert!(r46.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(r46.contains("incompatible_model"));
+    assert!(r46.contains("\"supported\":false"));
+
+    // (ar) POST /v1/agent/handoff validates specialist sub-agent delegation envelope
+    let body_handoff_ok = serde_json::json!({
+        "handoff": {
+            "parent_run_id": "run-p01",
+            "child_run_id": "run-c01",
+            "objective": "Scoped evidence search in docs",
+            "result_schema": "SpecialistEvidenceV1",
+            "depth": 1,
+            "max_depth": 2,
+            "remaining_tool_calls": 3,
+            "remaining_tokens": 1024,
+            "parent_allowed_roots": ["docs"],
+            "requested_allowed_roots": ["docs"],
+            "visited_run_ids": ["run-p01"]
+        }
+    })
+    .to_string();
+    let r47 = send_http(&format!(
+        "POST /v1/agent/handoff HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_handoff_ok}",
+        body_handoff_ok.len()
+    ));
+    assert!(r47.starts_with("HTTP/1.1 200 OK"));
+    assert!(r47.contains("\"status\":\"verified\""));
+    assert!(r47.contains("\"admitted\":true"));
+
+    // (as) POST /v1/agent/handoff fails closed when cycle is detected
+    let body_handoff_cycle = serde_json::json!({
+        "handoff": {
+            "parent_run_id": "run-p01",
+            "child_run_id": "run-c01",
+            "objective": "Cyclic handoff",
+            "result_schema": "SpecialistEvidenceV1",
+            "depth": 1,
+            "max_depth": 2,
+            "remaining_tool_calls": 3,
+            "remaining_tokens": 1024,
+            "parent_allowed_roots": ["docs"],
+            "requested_allowed_roots": ["docs"],
+            "visited_run_ids": ["run-p01", "run-c01"]
+        }
+    })
+    .to_string();
+    let r48 = send_http(&format!(
+        "POST /v1/agent/handoff HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_handoff_cycle}",
+        body_handoff_cycle.len()
+    ));
+    assert!(r48.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(r48.contains("budget_exhausted"));
+    assert!(r48.contains("cycle detected"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());
