@@ -39,5 +39,10 @@ jobs:
         run: |
           cargo run --locked -p lora-cli -- generate-fixture ./ci-smoke.gguf
           cargo run --locked -p lora-cli -- inspect
+          cargo run --locked -p lora-cli -- risk-matrix
+          cargo run --locked -p lora-cli -- import ./ci-smoke.gguf --alias ci-model
+          cargo run --locked -p lora-cli -- plan --model ci-model --context 2048
+          cargo run --locked -p lora-cli -- chat --model ci-model --prompt "Smoke test local-first inference"
           cargo run --locked -p lora-api -- --print-openapi
           cargo run --locked -p lora-desktop -- --dump-view-model
+          cargo run --locked -p lora-desktop -- --preview-consent "docs/guide.md"

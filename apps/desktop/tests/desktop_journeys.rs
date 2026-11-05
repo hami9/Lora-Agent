@@ -73,4 +73,39 @@ fn desktop_shell_view_model_csp_and_capabilities_e2e() {
     let perms = cap_json["permissions"].to_string();
     assert!(!perms.contains("shell:"));
     assert!(!perms.contains("fs:allow-all"));
+
+    // 5. Verify --preview-consent neutralizes HTML/script injection and sets default_button_focus="deny"
+    let consent_out = Command::new(desktop_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "--preview-consent",
+            "docs/<script>alert(1)</script>.md",
+        ])
+        .output()
+        .expect("run lora-desktop --preview-consent");
+    assert!(consent_out.status.success());
+    let consent_vm: lora_core::TrustedConsentDialogViewModel =
+        serde_json::from_slice(&consent_out.stdout).expect("parse TrustedConsentDialogViewModel");
+    assert_eq!(consent_vm.default_button_focus, "deny");
+    assert!(!consent_vm.target_relative_path.contains("<script>"));
+    assert!(consent_vm.target_relative_path.contains("&lt;script&gt;"));
+
+    // 6. Verify --slice-transcript bounds visible DOM items to viewport capacity (`R12`)
+    let slice_out = Command::new(desktop_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "--slice-transcript",
+            "5000,1200,25",
+        ])
+        .output()
+        .expect("run lora-desktop --slice-transcript");
+    assert!(slice_out.status.success());
+    let slice_vm: lora_core::VirtualizedTranscriptSlice<String> =
+        serde_json::from_slice(&slice_out.stdout).expect("parse VirtualizedTranscriptSlice");
+    assert_eq!(slice_vm.total_items, 5000);
+    assert_eq!(slice_vm.start_index, 1200);
+    assert_eq!(slice_vm.end_index, 1225);
+    assert_eq!(slice_vm.visible_items.len(), 25);
 }

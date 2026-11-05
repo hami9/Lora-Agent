@@ -51,11 +51,17 @@ pub struct TrustedConsentDialogViewModel {
 
 impl TrustedConsentDialogViewModel {
     pub fn from_approval_request(req: &ApprovalRequest) -> Self {
+        let escape_html = |s: &str| {
+            redact_sensitive_text(s)
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+        };
         Self {
-            run_id: redact_sensitive_text(&req.run_id),
-            tool_id: redact_sensitive_text(&req.tool_id),
-            scope_root_id: redact_sensitive_text(&req.root_id),
-            target_relative_path: redact_sensitive_text(&req.relative_path),
+            run_id: escape_html(&req.run_id),
+            tool_id: escape_html(&req.tool_id),
+            scope_root_id: escape_html(&req.root_id),
+            target_relative_path: escape_html(&req.relative_path),
             read_byte_limit: req.max_bytes,
             destination_label: "local_isolated_worker (no external transmission)".to_string(),
             grant_lifetime_label: "one-time or current session scope".to_string(),

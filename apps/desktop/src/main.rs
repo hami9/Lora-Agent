@@ -4,8 +4,8 @@
 
 use clap::Parser;
 use lora_core::{
-    ApprovalDecision, ApprovalPromptPort, ApprovalRequest, LoraApplicationService, LoraError,
-    DEFAULT_SAFETY_RESERVE_BYTES,
+    slice_virtualized_transcript, ApprovalDecision, ApprovalPromptPort, ApprovalRequest,
+    LoraApplicationService, LoraError, TrustedConsentDialogViewModel, DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
     InProcessWorkerSpawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -31,6 +31,14 @@ struct DesktopCli {
     /// Emit initial desktop dashboard view-model JSON and exit
     #[arg(long)]
     dump_view_model: bool,
+
+    /// Emit a WCAG 2.2 AA TrustedConsentDialogViewModel JSON for a proposed relative path and exit
+    #[arg(long)]
+    preview_consent: Option<String>,
+
+    /// Emit a VirtualizedTranscriptSlice JSON window for `<total_items>,<scroll_offset>,<viewport_capacity>` (`R12`)
+    #[arg(long, value_delimiter = ',')]
+    slice_transcript: Vec<usize>,
 }
 
 struct DenyByDefaultDesktopPrompt;
@@ -82,6 +90,39 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    if let Some(rel_path) = cli.preview_consent {
+        let req = ApprovalRequest {
+            run_id: "run-desktop-preview".to_string(),
+            proposal_id: "prop-desktop-1".to_string(),
+            tool_id: "read_file".to_string(),
+            root_id: "ws-desktop".to_string(),
+            root_display_path: data_dir.to_string_lossy().to_string(),
+            relative_path: rel_path,
+            max_bytes: 32768,
+            purpose: "Read file in approved workspace scope".to_string(),
+            approval_digest: "sha256:preview-action-digest".to_string(),
+        };
+        let dialog = TrustedConsentDialogViewModel::from_approval_request(&req);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&dialog).expect("serialize TrustedConsentDialogViewModel")
+        );
+        return;
+    }
+
+    if cli.slice_transcript.len() == 3 {
+        let total = cli.slice_transcript[0];
+        let offset = cli.slice_transcript[1];
+        let cap = cli.slice_transcript[2];
+        let items: Vec<String> = (0..total).map(|i| format!("msg-{i}")).collect();
+        let slice = slice_virtualized_transcript(&items, offset, cap);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&slice).expect("serialize VirtualizedTranscriptSlice")
+        );
+        return;
+    }
 
     if cli.dump_view_model {
         println!(

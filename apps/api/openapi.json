@@ -92,6 +92,16 @@
           }
         }
       }
+    },
+    "/v1/risk-matrix": {
+      "get": {
+        "summary": "Return the R01-R18 Risk Register verification matrix",
+        "responses": {
+          "200": {
+            "description": "Verified risk-register controls and fallback policies"
+          }
+        }
+      }
     }
   }
 }

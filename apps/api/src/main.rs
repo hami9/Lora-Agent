@@ -5,9 +5,10 @@
 
 use clap::Parser;
 use lora_core::{
-    now_epoch_ms, validate_loopback_bind, verify_loopback_http_security, ApiRunManager,
-    ApprovalDecision, ApprovalPromptPort, ApprovalRequest, IdempotencyLedger,
-    LoraApplicationService, LoraError, DEFAULT_SAFETY_RESERVE_BYTES,
+    default_risk_register_matrix, now_epoch_ms, validate_loopback_bind,
+    verify_loopback_http_security, ApiRunManager, ApprovalDecision, ApprovalPromptPort,
+    ApprovalRequest, IdempotencyLedger, LoraApplicationService, LoraError,
+    DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
     InProcessWorkerSpawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -43,6 +44,10 @@ struct ApiCli {
     /// Process a single request and exit (used for deterministic qualification tests)
     #[arg(long)]
     once: bool,
+
+    /// Maximum number of requests to serve before exiting (0 = unlimited)
+    #[arg(long, default_value_t = 0)]
+    max_requests: usize,
 }
 
 struct DenyByDefaultApiPrompt;
@@ -114,12 +119,14 @@ fn main() {
 
     let mut ledger = IdempotencyLedger::new();
     let mut run_mgr = ApiRunManager::default();
+    let mut served = 0usize;
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else {
             continue;
         };
         let _ = handle_http_connection(&mut stream, token, &app, &mut ledger, &mut run_mgr);
-        if cli.once {
+        served += 1;
+        if cli.once || (cli.max_requests > 0 && served >= cli.max_requests) {
             break;
         }
     }
@@ -228,6 +235,11 @@ fn handle_http_connection(
         ("GET", "/v1/models") => {
             let models = app.registry.list_models().unwrap_or_default();
             let body = serde_json::to_string(&models).unwrap_or_else(|_| "[]".to_string());
+            write_http_response(stream, "200 OK", "application/json", &body)
+        }
+        ("GET", "/v1/risk-matrix") => {
+            let matrix = default_risk_register_matrix();
+            let body = serde_json::to_string(&matrix).unwrap_or_else(|_| "[]".to_string());
             write_http_response(stream, "200 OK", "application/json", &body)
         }
         ("POST", "/v1/runs") => {

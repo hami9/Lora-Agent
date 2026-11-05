@@ -794,6 +794,94 @@ fn cli_subprocess_e2e_workflow() {
         .unwrap();
     assert!(search_out.status.success());
     assert!(String::from_utf8_lossy(&search_out.stdout).contains("note.txt"));
+
+    // 5. Exercise risk-matrix, compatibility, and context-budget CLI subcommands
+    let risk_out = Command::new(lora_bin)
+        .env("LORA_DATA_DIR", &data_dir)
+        .args(["risk-matrix"])
+        .output()
+        .unwrap();
+    assert!(risk_out.status.success());
+    assert!(String::from_utf8_lossy(&risk_out.stdout).contains("[R18]"));
+
+    let compat_ok = Command::new(lora_bin)
+        .env("LORA_DATA_DIR", &data_dir)
+        .args(["compatibility", "--filename", "qwen-3b-q4_k_m.gguf"])
+        .output()
+        .unwrap();
+    assert!(compat_ok.status.success());
+
+    let compat_err = Command::new(lora_bin)
+        .env("LORA_DATA_DIR", &data_dir)
+        .args(["compatibility", "--filename", "model.safetensors"])
+        .output()
+        .unwrap();
+    assert!(!compat_err.status.success());
+
+    let budget_out = Command::new(lora_bin)
+        .env("LORA_DATA_DIR", &data_dir)
+        .args([
+            "context-budget",
+            "--window",
+            "2048",
+            "--output",
+            "512",
+            "--user",
+            "256",
+        ])
+        .output()
+        .unwrap();
+    assert!(budget_out.status.success());
+    assert!(String::from_utf8_lossy(&budget_out.stdout).contains("Remaining headroom"));
+
+    // 6. Exercise broker and handoff-check CLI subcommands (including authority escalation rejection)
+    let broker_ok = Command::new(lora_bin)
+        .env("LORA_DATA_DIR", &data_dir)
+        .args(["broker", "--service", "lora-local-service"])
+        .output()
+        .unwrap();
+    assert!(broker_ok.status.success());
+
+    let broker_denied = Command::new(lora_bin)
+        .env("LORA_DATA_DIR", &data_dir)
+        .args(["broker", "--service", "unlisted-root-daemon"])
+        .output()
+        .unwrap();
+    assert!(!broker_denied.status.success());
+
+    let handoff_ok = Command::new(lora_bin)
+        .env("LORA_DATA_DIR", &data_dir)
+        .args([
+            "handoff-check",
+            "--parent-run",
+            "run-p1",
+            "--child-run",
+            "run-c1",
+            "--parent-roots",
+            "ws-a,ws-b",
+            "--requested-roots",
+            "ws-a",
+        ])
+        .output()
+        .unwrap();
+    assert!(handoff_ok.status.success());
+
+    let handoff_escalated = Command::new(lora_bin)
+        .env("LORA_DATA_DIR", &data_dir)
+        .args([
+            "handoff-check",
+            "--parent-run",
+            "run-p1",
+            "--child-run",
+            "run-c2",
+            "--parent-roots",
+            "ws-a",
+            "--requested-roots",
+            "ws-a,ws-secret",
+        ])
+        .output()
+        .unwrap();
+    assert!(!handoff_escalated.status.success());
 }
 
 #[test]

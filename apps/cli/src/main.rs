@@ -2,12 +2,15 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use lora_core::{
-    apply_approved_patch, default_risk_register_matrix, evaluate_adapter_promotion_gate,
-    now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch, validate_catalog_variant,
-    AgentLimits, ApprovalDecision, ApprovalPromptPort, ApprovalRequest, CatalogVariantDescriptor,
-    ExecutionMode, ExtensionManifestV1, HardwareProbePort, HeldOutEvaluationReceipt,
-    LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, TrainingExample,
-    TuningCacheKey, TuningProfile, TuningTrialSample, DEFAULT_SAFETY_RESERVE_BYTES,
+    allocate_context_budget, apply_approved_patch, classify_artifact_compatibility,
+    default_risk_register_matrix, evaluate_adapter_promotion_gate, now_epoch_ms,
+    prepare_leakage_free_splits, preview_checked_patch, validate_catalog_variant,
+    validate_specialist_handoff, AgentLimits, ApprovalDecision, ApprovalPromptPort,
+    ApprovalRequest, BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor,
+    ContextBudgetRequest, ExecutionMode, ExtensionManifestV1, HardwareProbePort,
+    HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig, PatchProposal,
+    PrivilegedBrokerGate, SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey,
+    TuningProfile, TuningTrialSample, DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
     InProcessWorkerSpawner, OsScopedFileExecutor, OsStoreLockPort, SubprocessWorkerSpawner,
@@ -310,6 +313,61 @@ enum Commands {
 
     /// Print the Risk Register verification matrix (`R01` through `R18`, `docs/RISK_REGISTER.md`)
     RiskMatrix,
+
+    /// Classify an artifact filename against the GGUF compatibility matrix (`docs/INFERENCE_ENGINE.md`)
+    Compatibility {
+        /// Artifact filename (e.g. `qwen-3b-q4_k_m.gguf`, `model.safetensors`, `vision-mmproj.gguf`)
+        #[arg(long)]
+        filename: String,
+    },
+
+    /// Compute deterministic context-window token allocation (`docs/MEMORY_AND_RAG.md`)
+    ContextBudget {
+        /// Total context window in tokens
+        #[arg(long, default_value_t = 2048)]
+        window: u32,
+        /// Reserved output generation tokens
+        #[arg(long, default_value_t = 512)]
+        output: u32,
+        /// User request token count
+        #[arg(long, default_value_t = 256)]
+        user: u32,
+    },
+
+    /// Validate and consume a single-use challenge-bound privileged broker permit (`docs/OS_INTEGRATION.md`, `R09`)
+    Broker {
+        /// Allowlisted service name
+        #[arg(long, default_value = "lora-local-service")]
+        service: String,
+        /// Session ID
+        #[arg(long, default_value = "sess-cli-1")]
+        session: String,
+        /// Single-use challenge nonce
+        #[arg(long, default_value = "nonce-cli-0001")]
+        nonce: String,
+    },
+
+    /// Validate a specialist sub-agent delegation envelope (`docs/AGENT_RUNTIME.md`)
+    HandoffCheck {
+        /// Parent run ID
+        #[arg(long)]
+        parent_run: String,
+        /// Child run ID
+        #[arg(long)]
+        child_run: String,
+        /// Delegation depth (1-based)
+        #[arg(long, default_value_t = 1)]
+        depth: u32,
+        /// Maximum allowed delegation depth
+        #[arg(long, default_value_t = 2)]
+        max_depth: u32,
+        /// Comma-separated allowed workspace root IDs on the parent run
+        #[arg(long, value_delimiter = ',')]
+        parent_roots: Vec<String>,
+        /// Comma-separated workspace root IDs requested for the child run
+        #[arg(long, value_delimiter = ',')]
+        requested_roots: Vec<String>,
+    },
 }
 
 struct TerminalApprovalPrompt {
@@ -1049,6 +1107,101 @@ fn main() {
                     row.risk_id, row.owner, row.severity, row.verified, row.mitigation_control
                 );
             }
+            Ok(())
+        }
+        Commands::Compatibility { filename } => {
+            classify_artifact_compatibility(&filename)?;
+            println!("Artifact   : {filename}");
+            println!("Class      : single_file_gguf_text");
+            println!("Supported  : true");
+            Ok(())
+        }
+        Commands::ContextBudget {
+            window,
+            output,
+            user,
+        } => {
+            let req = ContextBudgetRequest {
+                context_window_tokens: window,
+                reserved_output_tokens: output,
+                control_schema_overhead_tokens: 128,
+                user_request_tokens: user,
+                recent_turns_tokens: 128,
+                tool_receipts_tokens: 64,
+                ranked_excerpts: vec![],
+            };
+            let alloc = allocate_context_budget(&req)?;
+            println!(
+                "Context window     : {} tokens",
+                alloc.context_window_tokens
+            );
+            println!(
+                "Reserved output    : {} tokens",
+                alloc.reserved_output_tokens
+            );
+            println!("User request       : {} tokens", alloc.user_request_tokens);
+            println!(
+                "Total allocated    : {} tokens",
+                alloc.total_allocated_tokens
+            );
+            println!(
+                "Remaining headroom : {} tokens",
+                alloc.remaining_headroom_tokens
+            );
+            Ok(())
+        }
+        Commands::Broker {
+            service,
+            session,
+            nonce,
+        } => {
+            let mut gate = PrivilegedBrokerGate::new(vec!["lora-local-service".to_string()]);
+            let verb = BrokerVerb::RestartAllowlistedService {
+                service_name: service.clone(),
+            };
+            let now = now_epoch_ms();
+            let permit = BrokerSingleUsePermit {
+                permit_id: format!("permit-{now}"),
+                session_id: session.clone(),
+                challenge_nonce: nonce.clone(),
+                verb: verb.clone(),
+                request_digest: BrokerSingleUsePermit::compute_request_digest(
+                    &session, &nonce, &verb,
+                ),
+                expires_at_ms: now + 60_000,
+            };
+            let status = gate.validate_and_consume_permit(&permit, now)?;
+            println!("Broker service : {service}");
+            println!("Permit digest  : {}", permit.request_digest);
+            println!("Status         : {status:?}");
+            Ok(())
+        }
+        Commands::HandoffCheck {
+            parent_run,
+            child_run,
+            depth,
+            max_depth,
+            parent_roots,
+            requested_roots,
+        } => {
+            let env = SpecialistHandoffEnvelope {
+                parent_run_id: parent_run.clone(),
+                child_run_id: child_run.clone(),
+                objective: "Verify scoped evidence in delegated workspace".to_string(),
+                result_schema: "SpecialistEvidenceV1".to_string(),
+                depth,
+                max_depth,
+                remaining_tool_calls: 2,
+                remaining_tokens: 512,
+                parent_allowed_roots: parent_roots,
+                requested_allowed_roots: requested_roots,
+                visited_run_ids: vec![parent_run],
+            };
+            validate_specialist_handoff(&env)?;
+            println!(
+                "Specialist handoff verified: {} -> {} (depth {}/{})",
+                env.parent_run_id, env.child_run_id, env.depth, env.max_depth
+            );
             Ok(())
         }
         Commands::GenerateFixture { .. } => unreachable!(),

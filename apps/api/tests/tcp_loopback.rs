@@ -64,4 +64,102 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(resp.starts_with("HTTP/1.1 200 OK"));
     assert!(resp.contains("\"api_major\":1"));
     assert!(resp.contains("\"runs.events.sse\""));
+
+    // 3. Multi-request live TCP session: POST /v1/runs (idempotency + 409 conflict), GET /v1/runs/{id}/events, POST /v1/runs/{id}/cancel, and 403 DNS-rebinding rejection
+    let bind_addr2 = find_free_loopback_addr();
+    let mut child2 = Command::new(api_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "--bind",
+            &bind_addr2,
+            "--token",
+            "live-secret-token-42",
+            "--max-requests",
+            "8",
+        ])
+        .spawn()
+        .expect("spawn multi-request lora-api");
+
+    let send_http = |raw_req: &str| -> String {
+        let mut conn = None;
+        for _ in 0..40 {
+            if let Ok(s) = TcpStream::connect(&bind_addr2) {
+                conn = Some(s);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let mut conn = conn.expect("connect to lora-api");
+        conn.write_all(raw_req.as_bytes()).unwrap();
+        let mut out = String::new();
+        conn.read_to_string(&mut out).unwrap();
+        out
+    };
+
+    // (a) Create run with Idempotency-Key
+    let body_create = r#"{"model":"qwen","prompt":"hello"}"#;
+    let r1 = send_http(&format!(
+        "POST /v1/runs HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nIdempotency-Key: idem-tcp-1\r\nContent-Length: {}\r\n\r\n{body_create}",
+        body_create.len()
+    ));
+    assert!(r1.starts_with("HTTP/1.1 202 Accepted"));
+
+    // Extract run_id from JSON body
+    let body_json_str = r1.split("\r\n\r\n").nth(1).unwrap();
+    let created_val: serde_json::Value = serde_json::from_str(body_json_str).unwrap();
+    let run_id = created_val["run_id"].as_str().unwrap().to_string();
+
+    // (b) Replay same Idempotency-Key + same body -> returns exact same run_id
+    let r2 = send_http(&format!(
+        "POST /v1/runs HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nIdempotency-Key: idem-tcp-1\r\nContent-Length: {}\r\n\r\n{body_create}",
+        body_create.len()
+    ));
+    assert!(r2.starts_with("HTTP/1.1 202 Accepted"));
+    assert!(r2.contains(&run_id));
+
+    // (c) Reuse same Idempotency-Key with different payload -> 409 Conflict
+    let body_diff = r#"{"model":"qwen","prompt":"tampered"}"#;
+    let r3 = send_http(&format!(
+        "POST /v1/runs HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nIdempotency-Key: idem-tcp-1\r\nContent-Length: {}\r\n\r\n{body_diff}",
+        body_diff.len()
+    ));
+    assert!(r3.starts_with("HTTP/1.1 409 Conflict"));
+
+    // (d) Stream SSE events for the run
+    let r4 = send_http(&format!(
+        "GET /v1/runs/{run_id}/events HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r4.starts_with("HTTP/1.1 200 OK"));
+    assert!(r4.contains("Content-Type: text/event-stream"));
+    assert!(r4.contains("event: run_started"));
+
+    // (e) Cancel the run idempotently
+    let r5 = send_http(&format!(
+        "POST /v1/runs/{run_id}/cancel HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r5.starts_with("HTTP/1.1 200 OK"));
+    assert!(r5.contains("\"state\":\"cancelled\""));
+
+    // (f) Cross-origin webpage Origin header rejected with 403 Forbidden (`R08`)
+    let r6 = send_http(&format!(
+        "GET /v1/models HTTP/1.1\r\nHost: {bind_addr2}\r\nOrigin: https://evil.example\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r6.starts_with("HTTP/1.1 403 Forbidden"));
+
+    // (g) Authenticated GET /v1/health and GET /v1/risk-matrix
+    let r7 = send_http(&format!(
+        "GET /v1/health HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r7.starts_with("HTTP/1.1 200 OK"));
+    assert!(r7.contains("\"status\":\"ok\""));
+
+    let r8 = send_http(&format!(
+        "GET /v1/risk-matrix HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r8.starts_with("HTTP/1.1 200 OK"));
+    assert!(r8.contains("\"risk_id\":\"R18\""));
+
+    let status2 = child2.wait().unwrap();
+    assert!(status2.success());
 }
