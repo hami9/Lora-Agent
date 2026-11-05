@@ -936,12 +936,13 @@ fn cli_subprocess_e2e_workflow() {
     // 8. Verify terminal ASCII art banner via `lora banner`
     let banner_out = Command::new(lora_bin)
         .env("LORA_DATA_DIR", &data_dir)
+        .env("NO_COLOR", "1")
         .args(["banner"])
         .output()
         .unwrap();
     assert!(banner_out.status.success());
     let banner_stdout = String::from_utf8_lossy(&banner_out.stdout);
-    assert!(banner_stdout.contains(".:+***+=:..:."));
+    assert!(banner_stdout.contains("▄▒▀▀░"));
     assert!(banner_stdout.contains("Lora Agent CLI"));
 }
 
