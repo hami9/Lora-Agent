@@ -223,6 +223,24 @@ fn phase6_extension_lifecycle_quarantine_and_rollback() {
             .package_sha256,
         "sha256_v100"
     );
+
+    // 8. Explicit disable and capability revocation
+    host.activate(
+        "org.example.wordcount",
+        &["input.text".to_string(), "workspace.summary".to_string()],
+    )
+    .unwrap();
+    assert_eq!(
+        host.get("org.example.wordcount").unwrap().state,
+        ExtensionState::Active
+    );
+    let dis_state = host.disable_and_revoke("org.example.wordcount").unwrap();
+    assert_eq!(dis_state, ExtensionState::Disabled);
+    assert!(host
+        .get("org.example.wordcount")
+        .unwrap()
+        .approved_capabilities
+        .is_empty());
 }
 
 #[test]
@@ -1721,4 +1739,91 @@ fn cli_patch_apply_with_receipt_and_rollback() {
         fs::read_to_string(&file_path).unwrap(),
         "timeout = 30\nretries = 3\n"
     );
+}
+
+#[test]
+fn cli_plugins_stage_activate_disable_and_list() {
+    use std::process::Command;
+
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().expect("tempdir");
+    let data_dir = tmp.path().join("data");
+    let manifest_path = tmp.path().join("manifest.json");
+
+    let manifest = serde_json::json!({
+        "manifest_version": 1,
+        "id": "org.cli.formatter",
+        "version": "1.0.0",
+        "kind": "wasm-component",
+        "host_api": { "major": 1, "minimum_minor": 0 },
+        "entry": "plugin.wasm",
+        "exports": ["tool.format.v1"],
+        "requests": ["fs.read"],
+        "dependencies": []
+    });
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| {
+        Command::new(lora_bin)
+            .env("LORA_DATA_DIR", &data_dir)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // 1. Stage manifest
+    let out_stage = run(&[
+        "plugins",
+        "--stage-manifest",
+        manifest_path.to_str().unwrap(),
+        "--sha256",
+        "sha256_mock_hash",
+    ]);
+    assert!(
+        out_stage.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out_stage.stderr)
+    );
+    let stdout_stage = String::from_utf8_lossy(&out_stage.stdout);
+    assert!(stdout_stage.contains("Staged and verified extension 'org.cli.formatter'"));
+
+    // 2. Activate with required grant
+    let out_act = run(&[
+        "plugins",
+        "--activate",
+        "org.cli.formatter",
+        "--grant",
+        "fs.read",
+    ]);
+    assert!(
+        out_act.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out_act.stderr)
+    );
+    let stdout_act = String::from_utf8_lossy(&out_act.stdout);
+    assert!(stdout_act.contains("Activated extension 'org.cli.formatter' -> Active"));
+
+    // 3. Disable and revoke permissions
+    let out_dis = run(&["plugins", "--disable", "org.cli.formatter"]);
+    assert!(
+        out_dis.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out_dis.stderr)
+    );
+    let stdout_dis = String::from_utf8_lossy(&out_dis.stdout);
+    assert!(stdout_dis.contains("Disabled extension 'org.cli.formatter' -> Disabled"));
+
+    // 4. List plugins
+    let out_list = run(&["plugins"]);
+    assert!(
+        out_list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out_list.stderr)
+    );
+    let stdout_list = String::from_utf8_lossy(&out_list.stdout);
+    assert!(stdout_list.contains("org.cli.formatter v1.0.0 [Disabled]"));
 }

@@ -105,6 +105,9 @@ enum Commands {
         /// Roll back an extension ID to its previous compatible digest
         #[arg(long)]
         rollback: Option<String>,
+        /// Disable an active extension ID and revoke its approved capabilities
+        #[arg(long)]
+        disable: Option<String>,
     },
 
     /// Import and verify a local single-file GGUF text model into content-addressed storage
@@ -645,6 +648,7 @@ fn main() {
             grant,
             fault,
             rollback,
+            disable,
         } => {
             let mut host = app.store.load_extension_host()?;
             if let Some(manifest_path) = stage_manifest {
@@ -663,6 +667,11 @@ fn main() {
                 let st = host.activate(&ext_id, &grant)?;
                 app.store.save_extension_host(&host)?;
                 println!("Activated extension '{ext_id}' -> {st:?}");
+            }
+            if let Some(ext_id) = disable {
+                let st = host.disable_and_revoke(&ext_id)?;
+                app.store.save_extension_host(&host)?;
+                println!("Disabled extension '{ext_id}' -> {st:?}");
             }
             if let Some(ext_id) = fault {
                 let st = host.record_fault(&ext_id)?;

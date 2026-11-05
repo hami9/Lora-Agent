@@ -162,6 +162,13 @@ fn route_request(
                 &format!("{:?}", e.reason_code()),
             ),
         },
+        "/api/plugins" => match app.store.load_extension_host() {
+            Ok(host) => HttpResponse::json(&host.list()),
+            Err(e) => HttpResponse::error(
+                "500 Internal Server Error",
+                &format!("{:?}", e.reason_code()),
+            ),
+        },
         "/api/risk-matrix" => HttpResponse::json(&default_risk_register_matrix()),
         "/api/hardware" => match app.hw_probe.capture_snapshot(data_dir) {
             Ok(snap) => HttpResponse::json(&snap),

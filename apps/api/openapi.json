@@ -197,6 +197,42 @@
           }
         }
       }
+    },
+    "/v1/plugins": {
+      "get": {
+        "summary": "List installed WASM and MCP extensions with their current state, faults, and grants",
+        "responses": {
+          "200": {
+            "description": "Array of InstalledExtensionRecord objects"
+          }
+        }
+      }
+    },
+    "/v1/plugins/stage": {
+      "post": {
+        "summary": "Stage and verify an extension manifest against policy rules",
+        "responses": {
+          "200": {
+            "description": "Extension staged successfully"
+          },
+          "400": {
+            "description": "Invalid manifest or policy denied"
+          }
+        }
+      }
+    },
+    "/v1/adapter/evaluate": {
+      "post": {
+        "summary": "Evaluate Adapter Studio promotion gate with held-out evaluation receipts",
+        "responses": {
+          "200": {
+            "description": "AdapterStudioOutcome with promotion decision"
+          },
+          "400": {
+            "description": "Invalid job config or verification failed"
+          }
+        }
+      }
     }
   }
 }

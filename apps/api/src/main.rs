@@ -5,11 +5,12 @@
 
 use clap::Parser;
 use lora_core::{
-    apply_approved_patch, default_risk_register_matrix, now_epoch_ms, preview_checked_patch,
-    rollback_applied_patch, validate_loopback_bind, verify_loopback_http_security, AgentLimits,
-    ApiRunManager, ApprovalDecision, ApprovalPromptPort, ApprovalRequest, CompensatingPatchReceipt,
-    ExecutionMode, IdempotencyLedger, LoraApplicationService, LoraError, PatchProposal,
-    TuningProfile, DEFAULT_SAFETY_RESERVE_BYTES,
+    apply_approved_patch, default_risk_register_matrix, evaluate_adapter_promotion_gate,
+    now_epoch_ms, preview_checked_patch, rollback_applied_patch, validate_loopback_bind,
+    verify_loopback_http_security, AgentLimits, ApiRunManager, ApprovalDecision,
+    ApprovalPromptPort, ApprovalRequest, CompensatingPatchReceipt, ExecutionMode,
+    ExtensionManifestV1, HeldOutEvaluationReceipt, IdempotencyLedger, LoraApplicationService,
+    LoraError, LoraJobConfig, PatchProposal, TuningProfile, DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -299,6 +300,406 @@ fn handle_http_connection(
             let matrix = default_risk_register_matrix();
             let body = serde_json::to_string(&matrix).unwrap_or_else(|_| "[]".to_string());
             write_http_response(stream, "200 OK", "application/json", &body)
+        }
+        ("GET", "/v1/plugins") => {
+            let host = match app.store.load_extension_host() {
+                Ok(h) => h,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let body = serde_json::to_string(&host.list()).unwrap_or_else(|_| "[]".to_string());
+            write_http_response(stream, "200 OK", "application/json", &body)
+        }
+        ("POST", "/v1/plugins/stage") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let manifest_val = match req_json.get("manifest") {
+                Some(m) => m,
+                None => {
+                    let err = serde_json::json!({
+                        "code": "missing_parameter",
+                        "detail": "manifest field is required",
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let manifest: ExtensionManifestV1 = match serde_json::from_value(manifest_val.clone()) {
+                Ok(m) => m,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_manifest",
+                        "detail": format!("invalid extension manifest: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let pkg_sha = req_json
+                .get("package_sha256")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sha256_local");
+            let lock_sha = req_json
+                .get("lock_sha256")
+                .and_then(|v| v.as_str())
+                .unwrap_or(pkg_sha);
+            let mut host = match app.store.load_extension_host() {
+                Ok(h) => h,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            match host.stage_and_verify(manifest.clone(), pkg_sha, lock_sha) {
+                Ok(state) => {
+                    let _ = app.store.save_extension_host(&host);
+                    let body = serde_json::json!({
+                        "status": "staged",
+                        "extension_id": manifest.id,
+                        "state": state,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("POST", p) if p.starts_with("/v1/plugins/") && p.ends_with("/activate") => {
+            let id = &p["/v1/plugins/".len()..p.len() - "/activate".len()];
+            let req_json: serde_json::Value = serde_json::from_str(&body_str).unwrap_or_default();
+            let grants: Vec<String> = req_json
+                .get("grants")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut host = match app.store.load_extension_host() {
+                Ok(h) => h,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            match host.activate(id, &grants) {
+                Ok(state) => {
+                    let _ = app.store.save_extension_host(&host);
+                    let body = serde_json::json!({
+                        "status": "activated",
+                        "extension_id": id,
+                        "state": state,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("POST", p) if p.starts_with("/v1/plugins/") && p.ends_with("/disable") => {
+            let id = &p["/v1/plugins/".len()..p.len() - "/disable".len()];
+            let mut host = match app.store.load_extension_host() {
+                Ok(h) => h,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            match host.disable_and_revoke(id) {
+                Ok(state) => {
+                    let _ = app.store.save_extension_host(&host);
+                    let body = serde_json::json!({
+                        "status": "disabled",
+                        "extension_id": id,
+                        "state": state,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("POST", p) if p.starts_with("/v1/plugins/") && p.ends_with("/fault") => {
+            let id = &p["/v1/plugins/".len()..p.len() - "/fault".len()];
+            let mut host = match app.store.load_extension_host() {
+                Ok(h) => h,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            match host.record_fault(id) {
+                Ok(state) => {
+                    let _ = app.store.save_extension_host(&host);
+                    let body = serde_json::json!({
+                        "status": "fault_recorded",
+                        "extension_id": id,
+                        "state": state,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("POST", p) if p.starts_with("/v1/plugins/") && p.ends_with("/rollback") => {
+            let id = &p["/v1/plugins/".len()..p.len() - "/rollback".len()];
+            let mut host = match app.store.load_extension_host() {
+                Ok(h) => h,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            match host.rollback(id) {
+                Ok(prev) => {
+                    let _ = app.store.save_extension_host(&host);
+                    let body = serde_json::json!({
+                        "status": "rolled_back",
+                        "extension_id": id,
+                        "previous_digest": prev,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("GET", p) if p.starts_with("/v1/plugins/") => {
+            let id = &p["/v1/plugins/".len()..];
+            let host = match app.store.load_extension_host() {
+                Ok(h) => h,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            match host.get(id) {
+                Some(rec) => {
+                    let body = serde_json::to_string(rec).unwrap_or_default();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                None => {
+                    let err = serde_json::json!({
+                        "code": "not_found",
+                        "detail": format!("extension '{id}' not found"),
+                    })
+                    .to_string();
+                    write_http_response(stream, "404 Not Found", "application/json", &err)
+                }
+            }
+        }
+        ("POST", "/v1/adapter/evaluate") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let base_sha = req_json
+                .get("base_model_sha256")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sha256:base");
+            let tok_sha = req_json
+                .get("tokenizer_template_sha256")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sha256:tok");
+            let installed_sha = req_json
+                .get("installed_base_sha256")
+                .and_then(|v| v.as_str())
+                .unwrap_or(base_sha);
+            let job = LoraJobConfig {
+                job_id: req_json
+                    .get("job_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("job-eval-1")
+                    .to_string(),
+                base_model_sha256: base_sha.to_string(),
+                tokenizer_template_sha256: tok_sha.to_string(),
+                dataset_sha256: req_json
+                    .get("dataset_sha256")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("dataset-sha")
+                    .to_string(),
+                rank: req_json.get("rank").and_then(|v| v.as_u64()).unwrap_or(8) as u32,
+                alpha: req_json.get("alpha").and_then(|v| v.as_u64()).unwrap_or(16) as u32,
+                target_modules: vec!["q_proj".to_string(), "v_proj".to_string()],
+                epochs: 3,
+                context_length: 2048,
+                microbatch_size: 4,
+                seed: 42,
+            };
+            let eval = HeldOutEvaluationReceipt {
+                base_task_score_pct: req_json
+                    .get("base_task_score_pct")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(70) as u32,
+                adapter_task_score_pct: req_json
+                    .get("adapter_task_score_pct")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(85) as u32,
+                general_regression_pct: req_json
+                    .get("general_regression_pct")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+                schema_valid_pct: req_json
+                    .get("schema_valid_pct")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(100) as u32,
+                target_runtime_load_verified: req_json
+                    .get("target_runtime_load_verified")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+            };
+            match evaluate_adapter_promotion_gate(&job, installed_sha, eval) {
+                Ok(outcome) => {
+                    let body = serde_json::to_string(&outcome).unwrap_or_default();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
         }
         ("POST", "/v1/index") => {
             let req_json: serde_json::Value = match serde_json::from_str(&body_str) {

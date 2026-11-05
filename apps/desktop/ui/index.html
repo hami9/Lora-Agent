@@ -237,6 +237,12 @@
         <div class="card">
           <p>Default-deny WASM component sandbox, permission delta inspection, 3-fault quarantine, and digest rollback.</p>
         </div>
+        <div class="card" id="plugins-live" hidden>
+          <table aria-label="Installed extensions">
+            <thead><tr><th scope="col">Extension ID</th><th scope="col">Version</th><th scope="col">State</th><th scope="col">Faults</th><th scope="col">Capabilities</th></tr></thead>
+            <tbody id="plugins-tbody"></tbody>
+          </table>
+        </div>
       </section>
 
       <section id="screen-settings" class="screen" aria-labelledby="h-settings">
@@ -315,8 +321,24 @@
       }
       document.getElementById('models-live').hidden = models.length === 0;
     };
+    const loadPlugins = async () => {
+      const plugins = await getJson('/api/plugins');
+      const tbody = document.getElementById('plugins-tbody');
+      tbody.replaceChildren();
+      for (const p of plugins) {
+        const m = p.manifest || {};
+        const row = document.createElement('tr');
+        for (const cell of [m.id, m.version, p.state, p.consecutive_faults, (p.approved_capabilities || []).join(', ') || 'none']) {
+          const td = document.createElement('td');
+          td.textContent = cell === undefined || cell === null ? '—' : String(cell);
+          row.appendChild(td);
+        }
+        tbody.appendChild(row);
+      }
+      document.getElementById('plugins-live').hidden = plugins.length === 0;
+    };
     if (location.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)) {
-      Promise.allSettled([loadDashboard(), loadModels()]).then((results) => {
+      Promise.allSettled([loadDashboard(), loadModels(), loadPlugins()]).then((results) => {
         const failed = results.filter((r) => r.status === 'rejected').length;
         announce(failed ? 'Live runtime data partially unavailable.' : 'Live runtime data loaded.');
       });

@@ -130,7 +130,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "20",
+            "29",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -366,6 +366,127 @@ fn loopback_api_live_tcp_socket_e2e() {
         "GET /v1/models/api-model HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
     ));
     assert!(r20.starts_with("HTTP/1.1 404 Not Found"));
+
+    // (r) POST /v1/plugins/stage stages candidate extension manifest
+    let body_plugin_stage = serde_json::json!({
+        "manifest": {
+            "manifest_version": 1,
+            "id": "org.lora.wordcount",
+            "version": "1.0.0",
+            "kind": "wasm-component",
+            "host_api": { "major": 1, "minimum_minor": 0 },
+            "entry": "component.wasm",
+            "exports": ["tool.wordcount.v1"],
+            "requests": ["input.text"],
+            "dependencies": []
+        },
+        "package_sha256": "sha256_wordcount_v1",
+        "lock_sha256": "sha256_wordcount_v1"
+    })
+    .to_string();
+    let r21 = send_http(&format!(
+        "POST /v1/plugins/stage HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_plugin_stage}",
+        body_plugin_stage.len()
+    ));
+    assert!(r21.starts_with("HTTP/1.1 200 OK"));
+    assert!(r21.contains("\"status\":\"staged\""));
+    assert!(r21.contains("\"extension_id\":\"org.lora.wordcount\""));
+    assert!(r21.contains("\"state\":\"disabled\""));
+
+    // (s) POST /v1/plugins/{id}/activate grants approved capabilities and enables extension
+    let body_act = serde_json::json!({
+        "grants": ["input.text"]
+    })
+    .to_string();
+    let r22 = send_http(&format!(
+        "POST /v1/plugins/org.lora.wordcount/activate HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_act}",
+        body_act.len()
+    ));
+    assert!(r22.starts_with("HTTP/1.1 200 OK"));
+    assert!(r22.contains("\"status\":\"activated\""));
+    assert!(r22.contains("\"state\":\"active\""));
+
+    // (t) GET /v1/plugins lists installed extensions
+    let r23 = send_http(&format!(
+        "GET /v1/plugins HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r23.starts_with("HTTP/1.1 200 OK"));
+    assert!(r23.contains("\"id\":\"org.lora.wordcount\""));
+    assert!(r23.contains("\"approved_capabilities\":[\"input.text\"]"));
+
+    // (u) GET /v1/plugins/{id} returns extension record
+    let r24 = send_http(&format!(
+        "GET /v1/plugins/org.lora.wordcount HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r24.starts_with("HTTP/1.1 200 OK"));
+    assert!(r24.contains("\"state\":\"active\""));
+
+    // (v) POST /v1/plugins/{id}/disable revokes capabilities
+    let r25 = send_http(&format!(
+        "POST /v1/plugins/org.lora.wordcount/disable HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: 2\r\n\r\n{{}}"
+    ));
+    assert!(r25.starts_with("HTTP/1.1 200 OK"));
+    assert!(r25.contains("\"status\":\"disabled\""));
+    assert!(r25.contains("\"state\":\"disabled\""));
+
+    // (w) POST /v1/plugins/stage updates to v1.1.0 retaining previous compatible digest
+    let body_plugin_update = serde_json::json!({
+        "manifest": {
+            "manifest_version": 1,
+            "id": "org.lora.wordcount",
+            "version": "1.1.0",
+            "kind": "wasm-component",
+            "host_api": { "major": 1, "minimum_minor": 0 },
+            "entry": "component.wasm",
+            "exports": ["tool.wordcount.v1"],
+            "requests": ["input.text"],
+            "dependencies": []
+        },
+        "package_sha256": "sha256_wordcount_v2",
+        "lock_sha256": "sha256_wordcount_v2"
+    })
+    .to_string();
+    let r26 = send_http(&format!(
+        "POST /v1/plugins/stage HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_plugin_update}",
+        body_plugin_update.len()
+    ));
+    assert!(r26.starts_with("HTTP/1.1 200 OK"));
+
+    // (x) POST /v1/plugins/{id}/fault records fault
+    let r27 = send_http(&format!(
+        "POST /v1/plugins/org.lora.wordcount/fault HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: 2\r\n\r\n{{}}"
+    ));
+    assert!(r27.starts_with("HTTP/1.1 200 OK"));
+    assert!(r27.contains("\"status\":\"fault_recorded\""));
+
+    // (y) POST /v1/plugins/{id}/rollback reverts to previous compatible digest
+    let r28 = send_http(&format!(
+        "POST /v1/plugins/org.lora.wordcount/rollback HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: 2\r\n\r\n{{}}"
+    ));
+    assert!(r28.starts_with("HTTP/1.1 200 OK"));
+    assert!(r28.contains("\"status\":\"rolled_back\""));
+    assert!(r28.contains("\"previous_digest\":\"sha256_wordcount_v1\""));
+
+    // (z) POST /v1/adapter/evaluate verifies promotion gate
+    let body_eval = serde_json::json!({
+        "job_id": "eval-job-001",
+        "base_model_sha256": "sha256:llama-base",
+        "installed_base_sha256": "sha256:llama-base",
+        "dataset_sha256": "sha256:dataset-split",
+        "base_task_score_pct": 72,
+        "adapter_task_score_pct": 88,
+        "general_regression_pct": 0,
+        "schema_valid_pct": 100,
+        "target_runtime_load_verified": true
+    })
+    .to_string();
+    let r29 = send_http(&format!(
+        "POST /v1/adapter/evaluate HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_eval}",
+        body_eval.len()
+    ));
+    assert!(r29.starts_with("HTTP/1.1 200 OK"));
+    assert!(r29.contains("\"decision\":\"promote_experimental\""));
+    assert!(r29.contains("\"job_id\":\"eval-job-001\""));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());
