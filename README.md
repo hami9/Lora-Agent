@@ -13,7 +13,8 @@
 ## Key Highlights
 
 - **Local-First & Offline**: Zero network dependencies for model admission, inference, file reading, or audit journaling.
-- **Process-Isolated Native Worker**: Native C/C++ inference kernels (`llama.cpp` pin `7d516e25ead4653169236b3f90d13f7bd8629724`) execute in a supervised child process communicating over private 32-bit length-prefixed anonymous pipes.
+- **Process-Isolated Native Worker (`llama.cpp` FFI + Deterministic Modes)**: Native C++17 inference backend (`llama.cpp` pin `7d516e25ead4653169236b3f90d13f7bd8629724` / tag `b12125` behind `--features native-llama-cpp`) alongside a deterministic offline backend, communicating over private 32-bit length-prefixed anonymous pipes with real-time `ggml_abort_callback` cancellation, UTF-8 streaming piece reassembly, and `<tool_call>` tag filtering.
+- **Streaming GGUF v2/v3 Header Parser & Chunked Hashing**: Bounded reader parses all 13 GGUF metadata value types (including nested arrays and vocabulary tables) and all `ggml` quantization block sizes directly from the file header without loading multi-gigabyte model weights into memory, paired with 1 MiB chunked SHA-256 verification.
 - **Hardware Intelligence Engine (HIE)**: Pressure-aware admission planner evaluates real-time system memory and VRAM to prevent thrashing and out-of-memory crashes before model load.
 - **Default-Deny Policy Gate**: Capability-based security model binding operations to callers, runs, normalized resource scopes, and short-lived epochs.
 - **Untrusted Observation Envelopes**: File contents and tool outputs are strictly isolated as untrusted data inside model context, preventing prompt-injection privilege escalation.
@@ -25,13 +26,13 @@
 ## Workspace Architecture
 
 ```text
-├── Cargo.toml                  # Workspace root (version = "0.0.1")
+├── Cargo.toml                  # Workspace root (version = "0.1.0")
 ├── crates/
-│   ├── lora-protocol/          # v1 32-bit BE JSON framing, closed schemas & GGUF v2/v3 parser
+│   ├── lora-protocol/          # v1 32-bit BE JSON framing, closed schemas & streaming GGUF v2/v3 parser
 │   ├── lora-core/              # App service, SQLite store, registry, HIE, policy gate & RAG
 │   └── lora-platform/          # OS scoped executor, hardware probe, lock & child supervision
 ├── workers/
-│   └── llama/                  # Isolated native llama.cpp worker binary
+│   └── llama/                  # Isolated llama.cpp worker (C++17 FFI shim + deterministic engine)
 ├── apps/
 │   ├── cli/                    # Trusted terminal composition root (lora)
 │   ├── api/                    # Opt-in loopback HTTP/SSE daemon (lora-api)
@@ -57,24 +58,27 @@ Lora Agent follows a strict Semantic Versioning progression:
 ### Prerequisites
 
 - **Rust**: 1.80+ (stable channel) with `rustfmt` and `clippy`
-- **C/C++ Build Tools**: Visual Studio Build Tools (Windows MSVC) or `build-essential` / `clang` (Linux / macOS)
+- **C/C++ Build Tools**: Visual Studio Build Tools (Windows MSVC) or `build-essential` / `clang` (Linux / macOS) plus `cmake` for `--features native-llama-cpp`
 - **Python**: 3.10+ (for documentation validation and packaging)
 
 ### Building and Testing
 
 ```sh
-# Clone repository
-git clone https://github.com/hami9/Lora-Agent.git
+# Clone repository (include submodules for the native llama.cpp worker)
+git clone --recurse-submodules https://github.com/hami9/Lora-Agent.git
 cd Lora-Agent
 
 # Format check and Clippy lints
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 
-# Build all workspace binaries
+# Build all workspace binaries (deterministic worker by default)
 cargo build --workspace --locked
 
-# Run unit, integration, and qualification tests (31 test cases)
+# Optional: build worker linked against vendored llama.cpp (requires CMake + C++17 toolchain)
+cargo build -p lora-llama-worker --features native-llama-cpp
+
+# Run unit, integration, and qualification tests (71+ test cases)
 cargo test --workspace --locked
 
 # Validate documentation and architecture diagrams
