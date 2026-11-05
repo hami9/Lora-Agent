@@ -114,8 +114,25 @@ extern "C" int32_t lora_llama_apply_template(const lora_llama * h, const char * 
 
 extern "C" int32_t lora_llama_tokenize(const lora_llama * h, const char * text, int32_t text_len,
                                        int32_t * tokens, int32_t cap) {
-    // add_special=false: the chat template already emits BOS and other special tokens as text.
-    return llama_tokenize(h->vocab, text, text_len, tokens, cap, false, true);
+    // The chat template emits special tokens as text (parse_special=true), so add_special=false.
+    // BOS is then added only if the vocab wants it and the text did not already produce it.
+    const bool want_bos = llama_vocab_get_add_bos(h->vocab);
+    if (!want_bos) {
+        return llama_tokenize(h->vocab, text, text_len, tokens, cap, false, true);
+    }
+    // Reserve slot 0 for a possible BOS.
+    const int32_t cap1 = cap > 0 ? cap - 1 : 0;
+    const int32_t n = llama_tokenize(h->vocab, text, text_len, cap > 0 ? tokens + 1 : nullptr, cap1, false, true);
+    if (n == INT32_MIN) return n;
+    if (n < 0) return n - 1; // needed count, plus the reserved BOS slot
+    if (cap <= 0) return -(n + 1);
+    const llama_token bos = llama_vocab_bos(h->vocab);
+    if (bos >= 0 && (n == 0 || tokens[1] != bos)) {
+        tokens[0] = bos;
+        return n + 1;
+    }
+    std::memmove(tokens, tokens + 1, static_cast<size_t>(n) * sizeof(int32_t));
+    return n;
 }
 
 extern "C" int32_t lora_llama_begin(lora_llama * h, const int32_t * tokens, int32_t n_tokens,

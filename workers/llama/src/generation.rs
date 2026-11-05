@@ -55,7 +55,7 @@ pub fn run_decode_loop(
         if text.is_empty() {
             return Ok(());
         }
-        let n = std::mem::take(unreported).max(1);
+        let n = std::mem::take(unreported);
         if emit(text, n) {
             Ok(())
         } else {
@@ -240,6 +240,9 @@ mod tests {
         );
         assert_eq!(o.finish_reason, FinishReason::Stop);
         assert_eq!(d.concat_text(), "The file says hi <");
+        // The held "<" is flushed with no new token, so counts still sum to completion_tokens.
+        assert_eq!(d.iter().map(|(_, n)| n).sum::<u32>(), o.completion_tokens);
+        assert_eq!(d.last().map(|(_, n)| *n), Some(0));
     }
 
     trait Concat {

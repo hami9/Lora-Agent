@@ -9,6 +9,7 @@
 
 mod backend;
 mod cancel;
+mod cpucheck;
 mod deterministic;
 mod generation;
 #[cfg(feature = "native-llama-cpp")]
@@ -66,6 +67,9 @@ enum Backend {
     Native(native::NativeBackend),
     /// Native was requested but is not compiled in; every load fails.
     Unavailable,
+    /// Native is compiled in but this CPU lacks required features; every load fails.
+    #[cfg(feature = "native-llama-cpp")]
+    CpuUnsupported(Vec<String>),
 }
 
 impl Backend {
@@ -74,7 +78,13 @@ impl Backend {
             BackendChoice::Deterministic => Backend::Deterministic(DeterministicBackend::default()),
             #[cfg(feature = "native-llama-cpp")]
             BackendChoice::Native => {
-                Backend::Native(native::NativeBackend::new(Arc::clone(_cancel)))
+                // Must run before any llama.cpp code: an unsupported CPU would fault.
+                let missing = cpucheck::missing_native_cpu_features();
+                if missing.is_empty() {
+                    Backend::Native(native::NativeBackend::new(Arc::clone(_cancel)))
+                } else {
+                    Backend::CpuUnsupported(missing)
+                }
             }
             #[cfg(not(feature = "native-llama-cpp"))]
             BackendChoice::Native => Backend::Unavailable,
@@ -95,6 +105,12 @@ impl Backend {
                     .map(str::to_string)
                     .collect(),
             ),
+            #[cfg(feature = "native-llama-cpp")]
+            Backend::CpuUnsupported(missing) => (
+                "llama.cpp".to_string(),
+                lora_protocol::PINNED_LLAMA_CPP_REVISION.to_string(),
+                vec![format!("cpu-unsupported:missing-{}", missing.join(","))],
+            ),
             _ => (
                 "lora-deterministic".to_string(),
                 "none".to_string(),
@@ -108,6 +124,14 @@ impl Backend {
             Backend::Deterministic(b) => b.load(args),
             #[cfg(feature = "native-llama-cpp")]
             Backend::Native(b) => b.load(args),
+            #[cfg(feature = "native-llama-cpp")]
+            Backend::CpuUnsupported(missing) => Err((
+                WorkerErrorCode::UnsupportedCapability,
+                format!(
+                    "this CPU lacks features required by the native llama.cpp build: {}",
+                    missing.join(", ")
+                ),
+            )),
             Backend::Unavailable => Err((
                 WorkerErrorCode::UnsupportedCapability,
                 "native llama.cpp backend requested but this worker was built without the                  native-llama-cpp feature"
@@ -130,6 +154,8 @@ impl Backend {
             #[cfg(feature = "native-llama-cpp")]
             Backend::Native(b) => b.unload(),
             Backend::Unavailable => {}
+            #[cfg(feature = "native-llama-cpp")]
+            Backend::CpuUnsupported(_) => {}
         }
     }
 
@@ -152,6 +178,19 @@ impl Backend {
             Backend::Deterministic(b) => b.generate(writer, fault_mode, g),
             #[cfg(feature = "native-llama-cpp")]
             Backend::Native(b) => b.generate(writer, g),
+            #[cfg(feature = "native-llama-cpp")]
+            Backend::CpuUnsupported(_) => {
+                let _ = write_worker_event(
+                    writer,
+                    &WorkerEvent::Error {
+                        request_id: Some(g.request_id),
+                        code: WorkerErrorCode::InvalidState,
+                        message: "no model loaded in worker".to_string(),
+                        retryable: false,
+                    },
+                );
+                Ok(())
+            }
             Backend::Unavailable => {
                 let _ = write_worker_event(
                     writer,

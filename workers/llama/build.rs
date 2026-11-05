@@ -4,6 +4,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const REVISION: &str = "7d516e25ead4653169236b3f90d13f7bd8629724";
 
@@ -20,6 +21,29 @@ fn main() {
     build_native();
 }
 
+/// Fail if the submodule checkout is not the pinned revision; warn if that cannot be determined.
+fn check_revision(llama_dir: &Path) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(llama_dir)
+        .args(["rev-parse", "HEAD"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let actual = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if actual != REVISION {
+                panic!(
+                    "llama.cpp submodule is at {actual} but this worker pins {REVISION}.\n\
+                     Run: git submodule update --init --depth 1 workers/llama/vendor/llama.cpp"
+                );
+            }
+        }
+        _ => println!(
+            "cargo:warning=could not verify the llama.cpp revision (git unavailable or not a checkout); expected {REVISION}"
+        ),
+    }
+}
+
 fn build_native() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let llama_dir = manifest.join("vendor").join("llama.cpp");
@@ -31,8 +55,10 @@ fn build_native() {
             llama_dir.display()
         );
     }
-    println!("cargo:rerun-if-changed=vendor/llama.cpp/CMakeLists.txt");
-    println!("cargo:rerun-if-changed=vendor/llama.cpp/include/llama.h");
+    check_revision(&llama_dir);
+    for p in ["CMakeLists.txt", "src", "ggml", "include"] {
+        println!("cargo:rerun-if-changed=vendor/llama.cpp/{p}");
+    }
 
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -58,7 +84,7 @@ fn build_native() {
         .define("GGML_BMI2", if x86_64 { "ON" } else { "OFF" })
         // keep the install tree small and avoid pulling cmake package metadata
         .define("LLAMA_BUILD_NUMBER", "12125")
-        .define("LLAMA_BUILD_COMMIT", &REVISION[..7]);
+        .define("LLAMA_BUILD_COMMIT", &REVISION[..7]); // verified by check_revision
     let dst = cfg.build();
 
     // Shim first: it depends on the llama/ggml archives linked after it.

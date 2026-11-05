@@ -25,8 +25,10 @@ typedef struct lora_llama lora_llama;
  * LORA_WORKER_LLAMA_LOG=1 (stdout is the protocol channel and must never receive log output). */
 void lora_llama_backend_init(void);
 
-/* Load a GGUF model and create a context. `abort_flag` points to an int32_t owned by the caller that
- * must outlive the returned handle; a non-zero value aborts the running decode. On failure returns
+/* Load a GGUF model and create a context. `abort_flag` points to an int32_t owned by the caller.
+ * The pointer must stay valid until lora_llama_free(); the shim reads it as std::atomic<int32_t>
+ * (relaxed), so the owner must only write it with atomic operations. A non-zero value aborts
+ * the running decode. On failure returns
  * NULL and writes a message prefixed "model:" or "context:" into `err`. */
 lora_llama * lora_llama_load(const char * path, uint32_t n_ctx, int32_t n_threads,
                              const int32_t * abort_flag, char * err, size_t err_len);
