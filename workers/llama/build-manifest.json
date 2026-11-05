@@ -1,17 +1,31 @@
 {
   "engine": "llama.cpp",
   "upstream_repository": "https://github.com/ggml-org/llama.cpp",
-  "pinned_revision": "c6a0ff11a0fe16ac1a2eb569190934593a2b3670",
+  "pinned_tag": "b12125",
+  "pinned_revision": "7d516e25ead4653169236b3f90d13f7bd8629724",
+  "vendored_as": "git submodule at workers/llama/vendor/llama.cpp",
   "patches": [],
+  "x86_64_requirement": "AVX2 + FMA + F16C + BMI2 (x86-64-v3); no runtime CPU detection",
+  "cargo_feature": "native-llama-cpp",
+  "cmake_profile": "Release",
   "cmake_flags": [
-    "-DGGML_NATIVE=OFF",
-    "-DGGML_AVX2=ON",
-    "-DGGML_FMA=ON",
-    "-DLLAMA_BUILD_SERVER=OFF",
+    "-DBUILD_SHARED_LIBS=OFF",
     "-DLLAMA_BUILD_TESTS=OFF",
+    "-DLLAMA_BUILD_TOOLS=OFF",
     "-DLLAMA_BUILD_EXAMPLES=OFF",
-    "-DBUILD_SHARED_LIBS=OFF"
+    "-DLLAMA_BUILD_SERVER=OFF",
+    "-DLLAMA_BUILD_COMMON=OFF",
+    "-DLLAMA_BUILD_APP=OFF",
+    "-DLLAMA_OPENSSL=OFF",
+    "-DGGML_NATIVE=OFF",
+    "-DGGML_OPENMP=OFF",
+    "-DGGML_METAL=OFF",
+    "-DGGML_AVX2=ON (x86_64 only)",
+    "-DGGML_FMA=ON (x86_64 only)",
+    "-DGGML_F16C=ON (x86_64 only)",
+    "-DGGML_BMI2=ON (x86_64 only)"
   ],
+  "shim": "native/lora_llama_shim.cpp (C++17, flat extern \"C\" API)",
   "qualified_targets": [
     {
       "triple": "x86_64-pc-windows-msvc",

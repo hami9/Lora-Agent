@@ -10,7 +10,7 @@ pub const SUPPORTED_PROTOCOL_MAJOR: u16 = 1;
 pub const CURRENT_PROTOCOL_MINOR: u16 = 0;
 
 /// Pinned upstream llama.cpp revision recorded in the architecture baseline (`docs/INFERENCE_ENGINE.md`).
-pub const PINNED_LLAMA_CPP_REVISION: &str = "c6a0ff11a0fe16ac1a2eb569190934593a2b3670";
+pub const PINNED_LLAMA_CPP_REVISION: &str = "7d516e25ead4653169236b3f90d13f7bd8629724";
 
 /// Golden hello payload from `docs/INFERENCE_ENGINE.md`.
 pub const GOLDEN_HELLO_JSON: &str = r#"{"type":"hello","versions":[{"major":1,"minor":0}],"nonce":"afcb26831b679a7621eabc53e375cb3a"}"#;

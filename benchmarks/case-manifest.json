@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pinned_worker_revision": "c6a0ff11a0fe16ac1a2eb569190934593a2b3670",
+  "pinned_worker_revision": "7d516e25ead4653169236b3f90d13f7bd8629724",
   "fixture": {
     "name": "lora-fixture-llama-1b-q4_k_m",
     "architecture": "llama",

@@ -46,3 +46,29 @@ jobs:
           cargo run --locked -p lora-api -- --print-openapi
           cargo run --locked -p lora-desktop -- --dump-view-model
           cargo run --locked -p lora-desktop -- --preview-consent "docs/guide.md"
+
+  native-llama:
+    name: Native llama.cpp worker (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Enable long paths (llama.cpp)
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Build worker with native-llama-cpp
+        run: cargo build -p lora-llama-worker --features native-llama-cpp --locked
+      - name: Clippy with native-llama-cpp
+        run: cargo clippy -p lora-llama-worker --all-targets --features native-llama-cpp --locked -- -D warnings
+      - name: Worker unit tests
+        run: cargo test -p lora-llama-worker --features native-llama-cpp --locked
