@@ -24,6 +24,11 @@ impl HardwareProbePort for SysinfoHardwareProbe {
             .map(|c| c.brand().to_string())
             .unwrap_or_else(|| "unknown-cpu".to_string());
 
+        // Only x86 targets push extra features below.
+        #[cfg_attr(
+            not(any(target_arch = "x86", target_arch = "x86_64")),
+            allow(unused_mut)
+        )]
         let mut cpu_isa_features = vec![std::env::consts::ARCH.to_string()];
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
