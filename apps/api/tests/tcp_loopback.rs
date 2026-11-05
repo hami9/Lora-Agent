@@ -130,7 +130,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "32",
+            "37",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -547,6 +547,80 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r32.starts_with("HTTP/1.1 200 OK"));
     assert!(r32.contains("\"key_digest\":"));
     assert!(r32.contains("\"optimal_threads\":"));
+
+    // (ad) GET /v1/audit/events lists recorded audit events
+    let r33 = send_http(&format!(
+        "GET /v1/audit/events HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r33.starts_with("HTTP/1.1 200 OK"));
+    assert!(r33.contains('['));
+
+    // (ae) POST /v1/audit/prune prunes older events
+    let body_prune = serde_json::json!({
+        "keep_latest": 50
+    })
+    .to_string();
+    let r34 = send_http(&format!(
+        "POST /v1/audit/prune HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_prune}",
+        body_prune.len()
+    ));
+    assert!(r34.starts_with("HTTP/1.1 200 OK"));
+    assert!(r34.contains("\"status\":\"pruned\""));
+    assert!(r34.contains("\"keep_latest\":50"));
+
+    // (af) GET /v1/audit/export exports redacted audit diagnostic bundle
+    let r35 = send_http(&format!(
+        "GET /v1/audit/export HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r35.starts_with("HTTP/1.1 200 OK"));
+    assert!(r35.contains('['));
+
+    // (ag) POST /v1/egress/preview computes preview digest for cloud egress consent
+    let body_egress_prev = serde_json::json!({
+        "provider_id": "openai-cloud",
+        "model_id": "gpt-4o",
+        "destination_origin": "https://api.openai.com",
+        "data_classes": ["user_prompt"],
+        "prompt_text": "Summarize deployment guide",
+        "attached_excerpts": ["CONFIG=prod"],
+        "estimated_cost_usd_micros": 1200
+    })
+    .to_string();
+    let r36 = send_http(&format!(
+        "POST /v1/egress/preview HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_egress_prev}",
+        body_egress_prev.len()
+    ));
+    assert!(r36.starts_with("HTTP/1.1 200 OK"));
+    let prev_resp: serde_json::Value =
+        serde_json::from_str(r36.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let approved_digest = prev_resp["preview_digest"].as_str().unwrap().to_string();
+
+    // (ah) POST /v1/egress/verify verifies payload against human-approved EgressPermit
+    let body_egress_ver = serde_json::json!({
+        "permit": {
+            "permit_id": "permit-live-01",
+            "principal": "loopback-api-client",
+            "approved_preview_digest": approved_digest,
+            "expires_at_ms": 253402300799000_u64
+        },
+        "actual_payload": {
+            "provider_id": "openai-cloud",
+            "model_id": "gpt-4o",
+            "destination_origin": "https://api.openai.com",
+            "data_classes": ["user_prompt"],
+            "prompt_text": "Summarize deployment guide",
+            "attached_excerpts": ["CONFIG=prod"],
+            "estimated_cost_usd_micros": 1200
+        }
+    })
+    .to_string();
+    let r37 = send_http(&format!(
+        "POST /v1/egress/verify HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_egress_ver}",
+        body_egress_ver.len()
+    ));
+    assert!(r37.starts_with("HTTP/1.1 200 OK"));
+    assert!(r37.contains("\"status\":\"verified\""));
+    assert!(r37.contains("\"permit_id\":\"permit-live-01\""));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());

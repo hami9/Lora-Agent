@@ -269,6 +269,62 @@
           }
         }
       }
+    },
+    "/v1/audit/events": {
+      "get": {
+        "summary": "List recorded audit journal events with optional run_id filter",
+        "responses": {
+          "200": {
+            "description": "Array of AuditRecord objects"
+          }
+        }
+      }
+    },
+    "/v1/audit/prune": {
+      "post": {
+        "summary": "Prune older audit records while retaining the latest N entries",
+        "responses": {
+          "200": {
+            "description": "Pruning confirmation with count of deleted records"
+          }
+        }
+      }
+    },
+    "/v1/audit/export": {
+      "get": {
+        "summary": "Export a redacted JSON diagnostic bundle of audit records",
+        "responses": {
+          "200": {
+            "description": "Redacted JSON diagnostic bundle"
+          }
+        }
+      }
+    },
+    "/v1/egress/preview": {
+      "post": {
+        "summary": "Compute cryptographic preview digest for cloud egress consent dialog",
+        "responses": {
+          "200": {
+            "description": "EgressConsentPreview and preview_digest"
+          },
+          "400": {
+            "description": "Malformed egress preview payload"
+          }
+        }
+      }
+    },
+    "/v1/egress/verify": {
+      "post": {
+        "summary": "Verify outgoing cloud provider payload against human-approved EgressPermit",
+        "responses": {
+          "200": {
+            "description": "Verification status: verified"
+          },
+          "400": {
+            "description": "Permit expired, payload changed, or policy denied"
+          }
+        }
+      }
     }
   }
 }

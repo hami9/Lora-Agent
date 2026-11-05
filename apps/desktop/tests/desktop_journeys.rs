@@ -149,7 +149,7 @@ fn desktop_loopback_bridge_serves_ui_and_view_models() {
             "--serve",
             "127.0.0.1:0",
             "--max-requests",
-            "10",
+            "11",
         ])
         .stdout(Stdio::piped())
         .spawn()
@@ -221,14 +221,19 @@ fn desktop_loopback_bridge_serves_ui_and_view_models() {
     assert!(head.starts_with("HTTP/1.1 200"));
     assert!(body.starts_with('['));
 
-    // 9. DNS-rebinding defense: foreign Host header is rejected
+    // 9. Audit events journal endpoint
+    let (head, body) = get("/api/audit");
+    assert!(head.starts_with("HTTP/1.1 200"));
+    assert!(body.starts_with('['));
+
+    // 10. DNS-rebinding defense: foreign Host header is rejected
     let (head, _) = http_request(
         &addr,
         "GET /api/dashboard HTTP/1.1\r\nHost: evil.example:80\r\nConnection: close\r\n\r\n",
     );
     assert!(head.starts_with("HTTP/1.1 403"));
 
-    // 10. Read-only bridge: non-GET methods are rejected
+    // 11. Read-only bridge: non-GET methods are rejected
     let (head, _) = http_request(
         &addr,
         &format!("POST /api/dashboard HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\n\r\n"),

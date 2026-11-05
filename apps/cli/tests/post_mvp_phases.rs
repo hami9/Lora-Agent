@@ -1952,3 +1952,50 @@ fn cli_adapter_dataset_split_and_export() {
     assert!(out_dir.join("val.json").exists());
     assert!(out_dir.join("test.json").exists());
 }
+
+#[test]
+fn cli_audit_journal_export_prune_and_filter() {
+    use std::process::Command;
+
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().expect("tempdir");
+    let data_dir = tmp.path().join("data");
+    let export_path = tmp.path().join("audit_export.json");
+
+    let run = |args: &[&str]| {
+        Command::new(lora_bin)
+            .env("LORA_DATA_DIR", &data_dir)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // 1. Initially empty audit journal
+    let out_init = run(&["audit"]);
+    assert!(out_init.status.success());
+
+    // 2. Execute incident recovery which logs an audit event
+    let out_rec = run(&["incident-recover"]);
+    assert!(out_rec.status.success());
+
+    // 3. Inspect audit events
+    let out_list = run(&["audit"]);
+    assert!(out_list.status.success());
+    let stdout_list = String::from_utf8_lossy(&out_list.stdout);
+    assert!(stdout_list.contains("security-coordinator"));
+    assert!(stdout_list.contains("incident-recovery"));
+    assert!(stdout_list.contains("incident-recovery"));
+
+    // 4. Export redacted audit bundle
+    let out_exp = run(&["audit", "--export", export_path.to_str().unwrap()]);
+    assert!(out_exp.status.success());
+    assert!(export_path.exists());
+    let exported_data = fs::read_to_string(&export_path).unwrap();
+    assert!(exported_data.starts_with('['));
+
+    // 5. Prune audit retention
+    let out_prune = run(&["audit", "--prune-keep", "10"]);
+    assert!(out_prune.status.success());
+    let stdout_prune = String::from_utf8_lossy(&out_prune.stdout);
+    assert!(stdout_prune.contains("Pruned"));
+}

@@ -256,6 +256,12 @@
         <div class="card">
           <p>Private local mode works without account setup. Revoking grants immediately increments the revocation epoch.</p>
         </div>
+        <div class="card" id="audit-live" hidden>
+          <table aria-label="Recent audit events">
+            <thead><tr><th scope="col">Seq</th><th scope="col">Run</th><th scope="col">Actor</th><th scope="col">Decision</th><th scope="col">Summary</th></tr></thead>
+            <tbody id="audit-tbody"></tbody>
+          </table>
+        </div>
       </section>
     </main>
   </div>
@@ -358,8 +364,23 @@
       }
       document.getElementById('tuning-live').hidden = receipts.length === 0;
     };
+    const loadAudit = async () => {
+      const events = await getJson('/api/audit');
+      const tbody = document.getElementById('audit-tbody');
+      tbody.replaceChildren();
+      for (const e of events.slice(0, 10)) {
+        const row = document.createElement('tr');
+        for (const cell of [e.seq, e.run_id ? e.run_id.slice(0, 8) : '—', e.actor, e.decision, e.summary]) {
+          const td = document.createElement('td');
+          td.textContent = cell === undefined || cell === null ? '—' : String(cell);
+          row.appendChild(td);
+        }
+        tbody.appendChild(row);
+      }
+      document.getElementById('audit-live').hidden = events.length === 0;
+    };
     if (location.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)) {
-      Promise.allSettled([loadDashboard(), loadModels(), loadPlugins(), loadTuning()]).then((results) => {
+      Promise.allSettled([loadDashboard(), loadModels(), loadPlugins(), loadTuning(), loadAudit()]).then((results) => {
         const failed = results.filter((r) => r.status === 'rejected').length;
         announce(failed ? 'Live runtime data partially unavailable.' : 'Live runtime data loaded.');
       });

@@ -7,11 +7,12 @@ use clap::Parser;
 use lora_core::{
     apply_approved_patch, default_risk_register_matrix, evaluate_adapter_promotion_gate,
     now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
-    validate_loopback_bind, verify_loopback_http_security, AgentLimits, ApiRunManager,
-    ApprovalDecision, ApprovalPromptPort, ApprovalRequest, CompensatingPatchReceipt, ExecutionMode,
-    ExtensionManifestV1, HeldOutEvaluationReceipt, IdempotencyLedger, LoraApplicationService,
-    LoraError, LoraJobConfig, PatchProposal, TrainingExample, TuningCacheKey, TuningProfile,
-    TuningTrialSample, DEFAULT_SAFETY_RESERVE_BYTES,
+    validate_loopback_bind, verify_egress_permit, verify_loopback_http_security, AgentLimits,
+    ApiRunManager, ApprovalDecision, ApprovalPromptPort, ApprovalRequest, CompensatingPatchReceipt,
+    EgressConsentPreview, EgressPermit, ExecutionMode, ExtensionManifestV1,
+    HeldOutEvaluationReceipt, IdempotencyLedger, LoraApplicationService, LoraError, LoraJobConfig,
+    PatchProposal, TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
+    DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -248,7 +249,21 @@ fn handle_http_connection(
 
     let principal = "loopback-api-client";
 
-    match (method, path_and_query) {
+    let (path, query_str) = path_and_query
+        .split_once('?')
+        .unwrap_or((path_and_query, ""));
+    let get_query_param = |key: &str| -> Option<String> {
+        query_str.split('&').find_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            if k == key {
+                Some(v.to_string())
+            } else {
+                None
+            }
+        })
+    };
+
+    match (method, path) {
         ("GET", "/v1/health") => {
             let body = r#"{"status":"ok","service":"lora-api","api_version":1}"#;
             write_http_response(stream, "200 OK", "application/json", body)
@@ -926,6 +941,208 @@ fn handle_http_connection(
                 )
             }
         },
+        ("GET", "/v1/audit/events") => {
+            let run_id = get_query_param("run_id");
+            match app.store.list_audit_events(run_id.as_deref()) {
+                Ok(events) => {
+                    let body = serde_json::to_string(&events).unwrap_or_default();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    )
+                }
+            }
+        }
+        ("POST", "/v1/audit/prune") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let keep_latest = req_json
+                .get("keep_latest")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(100) as usize;
+            match app.store.prune_audit_retention(keep_latest) {
+                Ok(pruned) => {
+                    let body = serde_json::json!({
+                        "status": "pruned",
+                        "pruned_records": pruned,
+                        "keep_latest": keep_latest,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    )
+                }
+            }
+        }
+        ("GET", "/v1/audit/export") => {
+            let run_id = get_query_param("run_id");
+            match app.store.export_redacted_audit_bundle(run_id.as_deref()) {
+                Ok(bundle) => write_http_response(stream, "200 OK", "application/json", &bundle),
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    )
+                }
+            }
+        }
+        ("POST", "/v1/egress/preview") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let preview: EgressConsentPreview = match serde_json::from_value(req_json) {
+                Ok(p) => p,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid egress preview payload: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let digest = preview.compute_preview_digest();
+            let body = serde_json::json!({
+                "preview": preview,
+                "preview_digest": digest,
+            })
+            .to_string();
+            write_http_response(stream, "200 OK", "application/json", &body)
+        }
+        ("POST", "/v1/egress/verify") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let permit: EgressPermit = match req_json
+                .get("permit")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+            {
+                Some(p) => p,
+                None => {
+                    let err = serde_json::json!({
+                        "code": "missing_parameter",
+                        "detail": "permit object is required",
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let actual: EgressConsentPreview = match req_json
+                .get("actual_payload")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+            {
+                Some(a) => a,
+                None => {
+                    let err = serde_json::json!({
+                        "code": "missing_parameter",
+                        "detail": "actual_payload object is required",
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            match verify_egress_permit(&permit, &actual, now_epoch_ms()) {
+                Ok(()) => {
+                    let body = serde_json::json!({
+                        "status": "verified",
+                        "permit_id": permit.permit_id,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
         ("POST", "/v1/index") => {
             let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
                 Ok(j) => j,
