@@ -20,11 +20,9 @@ use lora_core::{
     WorkerSpawnerPort,
 };
 use lora_protocol::{
-    parse_gguf_bytes, GenerationUsage, ProbedModelMetadata, WorkerCapabilities,
+    parse_gguf_file, sha256_file, GenerationUsage, ProbedModelMetadata, WorkerCapabilities,
     PINNED_LLAMA_CPP_REVISION,
 };
-use sha2::{Digest, Sha256};
-use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -97,18 +95,15 @@ impl WorkerSessionPort for InProcessWorkerSession {
         artifact_path: &Path,
         expected_sha256: &str,
     ) -> Result<ProbedModelMetadata, LoraError> {
-        let bytes = fs::read(artifact_path)?;
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        let actual = hex::encode(hasher.finalize());
-        if !expected_sha256.is_empty() && actual != expected_sha256 {
+        let actual = sha256_file(artifact_path)?;
+        if !expected_sha256.is_empty() && actual != expected_sha256.to_ascii_lowercase() {
             return Err(LoraError::DigestMismatch {
                 expected: expected_sha256.to_string(),
                 actual,
             });
         }
-        let parsed =
-            parse_gguf_bytes(&bytes).map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
+        let parsed = parse_gguf_file(artifact_path)
+            .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
         Ok(parsed.metadata)
     }
 
