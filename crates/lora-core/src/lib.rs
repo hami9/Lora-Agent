@@ -52,8 +52,9 @@ pub use desktop_facade::{
 };
 pub use error::{redact_sensitive_text, LoraError, ReasonCode};
 pub use memory::{
-    allocate_context_budget, chunk_document_text, reciprocal_rank_fusion, ContextBudgetAllocation,
-    ContextBudgetRequest, DocumentChunk, EmbeddingNamespace, IngestionReceipt, RetrievedEvidence,
+    allocate_context_budget, chunk_document_text, format_multi_turn_prompt, reciprocal_rank_fusion,
+    ChatTurn, ContextBudgetAllocation, ContextBudgetRequest, DocumentChunk, EmbeddingNamespace,
+    IngestionReceipt, RetrievedEvidence,
 };
 pub use patch_tool::{
     apply_approved_patch, preview_checked_patch, rollback_applied_patch, CompensatingPatchReceipt,
@@ -298,6 +299,40 @@ impl LoraApplicationService {
         cancel_flag: &Arc<AtomicBool>,
         on_delta: &mut dyn FnMut(&str) -> Result<(), LoraError>,
     ) -> Result<(AdmissionPlan, AgentRunOutcome), LoraError> {
+        self.run_rag_task(
+            run_id,
+            principal,
+            model_id_or_alias,
+            requested_context,
+            profile,
+            mode,
+            workspace_root,
+            prompt,
+            limits,
+            false,
+            cancel_flag,
+            on_delta,
+        )
+    }
+
+    /// Admit, load, and execute a bounded chat or file-assisted run with optional pre-run
+    /// SQLite FTS5 lexical RAG retrieval (`docs/MEMORY_AND_RAG.md`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_rag_task(
+        &self,
+        run_id: &str,
+        principal: &str,
+        model_id_or_alias: &str,
+        requested_context: u32,
+        profile: TuningProfile,
+        mode: ExecutionMode,
+        workspace_root: Option<&Path>,
+        prompt: &str,
+        limits: &AgentLimits,
+        use_rag: bool,
+        cancel_flag: &Arc<AtomicBool>,
+        on_delta: &mut dyn FnMut(&str) -> Result<(), LoraError>,
+    ) -> Result<(AdmissionPlan, AgentRunOutcome), LoraError> {
         let (manifest, blob_path) = self.registry.resolve_ready_model(model_id_or_alias)?;
         let snapshot = self.hw_probe.capture_snapshot(&self.data_dir)?;
         let primary_sha256 = manifest
@@ -378,7 +413,7 @@ impl LoraApplicationService {
             approval_ui: self.approval_ui.as_ref(),
         };
 
-        let run_res = agent.execute_run(
+        let run_res = agent.execute_run_with_rag(
             run_id,
             principal,
             &workspace_id,
@@ -388,6 +423,7 @@ impl LoraApplicationService {
             requested_context,
             prompt,
             limits,
+            use_rag,
             worker.as_mut(),
             cancel_flag,
             on_delta,

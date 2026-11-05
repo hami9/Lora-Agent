@@ -294,7 +294,13 @@ impl SqliteStore {
         if terms.is_empty() {
             return Ok(Vec::new());
         }
-        let fts_match_expr = terms.join(" OR ");
+        // Quote each sanitized term so natural-language prompts containing FTS5 operators
+        // (`AND`, `OR`, `NOT`, `NEAR`) are matched literally instead of raising syntax errors.
+        let fts_match_expr = terms
+            .iter()
+            .map(|t| format!("\"{t}\""))
+            .collect::<Vec<_>>()
+            .join(" OR ");
 
         let conn = self.conn_lock();
         let mut stmt = conn.prepare(
@@ -530,4 +536,68 @@ pub fn allocate_context_budget(
         total_allocated_tokens,
         remaining_headroom_tokens: remaining,
     })
+}
+
+/// A single persisted or in-memory conversation turn (`docs/MEMORY_AND_RAG.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatTurn {
+    pub role: String,
+    pub content: String,
+}
+
+/// Format a multi-turn conversation prompt while strictly enforcing the context window token budget
+/// (`docs/MEMORY_AND_RAG.md`). Older turns are dropped first when the budget is tight; the current
+/// user request is never silently truncated. Returns `(formatted_prompt, admitted_turn_count)`.
+pub fn format_multi_turn_prompt(
+    history: &[ChatTurn],
+    user_prompt: &str,
+    context_window_tokens: u32,
+    reserved_output_tokens: u32,
+) -> Result<(String, usize), LoraError> {
+    let user_request_tokens = ((user_prompt.len() / 4) + 1) as u32;
+    let turn_costs: Vec<u32> = history
+        .iter()
+        .map(|t| ((t.role.len() + t.content.len()) / 4 + 4) as u32)
+        .collect();
+    let total_history_tokens: u32 = turn_costs.iter().copied().sum();
+
+    let alloc = allocate_context_budget(&ContextBudgetRequest {
+        context_window_tokens,
+        reserved_output_tokens,
+        control_schema_overhead_tokens: 32,
+        user_request_tokens,
+        recent_turns_tokens: total_history_tokens,
+        tool_receipts_tokens: 0,
+        ranked_excerpts: Vec::new(),
+    })?;
+
+    if history.is_empty() || alloc.admitted_recent_turns_tokens == 0 {
+        return Ok((user_prompt.to_string(), 0));
+    }
+
+    let mut remaining_turn_budget = alloc.admitted_recent_turns_tokens;
+    let mut selected_indices = Vec::new();
+    for (idx, &cost) in turn_costs.iter().enumerate().rev() {
+        let cost = cost.max(1);
+        if cost <= remaining_turn_budget {
+            remaining_turn_budget -= cost;
+            selected_indices.push(idx);
+        } else {
+            break;
+        }
+    }
+    selected_indices.reverse();
+
+    if selected_indices.is_empty() {
+        return Ok((user_prompt.to_string(), 0));
+    }
+
+    let mut out = String::new();
+    for &idx in &selected_indices {
+        let turn = &history[idx];
+        let tag = turn.role.trim().to_ascii_uppercase();
+        out.push_str(&format!("[{tag}]: {}\n", turn.content.trim()));
+    }
+    out.push_str(&format!("[USER]: {user_prompt}"));
+    Ok((out, selected_indices.len()))
 }

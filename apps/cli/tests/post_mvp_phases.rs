@@ -1510,3 +1510,143 @@ fn rag_context_budgeting_rrf_namespace_and_specialist_handoff() {
     assert_eq!(risks.first().unwrap().risk_id, "R01");
     assert_eq!(risks.last().unwrap().risk_id, "R18");
 }
+
+/// `v0.1.2`: RAG-grounded `lora ask --use-rag` and persisted multi-turn `lora chat --history-file`.
+#[test]
+fn cli_rag_grounded_ask_and_multi_turn_chat_history() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().expect("tempdir");
+    let data_dir = tmp.path().join("rag_data");
+    let fixture = tmp.path().join("rag_fixture.gguf");
+    let ws = tmp.path().join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(
+        ws.join("deploy.md"),
+        "Deployment notes for the lattice rollout\nCONFIG_VALUE=amber_lattice_42\n",
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| {
+        Command::new(lora_bin)
+            .env("LORA_DATA_DIR", &data_dir)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    assert!(run(&["generate-fixture", fixture.to_str().unwrap()])
+        .status
+        .success());
+    assert!(
+        run(&["import", fixture.to_str().unwrap(), "--alias", "rag-model"])
+            .status
+            .success()
+    );
+    assert!(run(&[
+        "index",
+        "--scope",
+        ws.to_str().unwrap(),
+        "--files",
+        "deploy.md"
+    ])
+    .status
+    .success());
+
+    // 1. RAG-grounded ask answers from retrieved FTS5 evidence even with tool calls denied
+    let ask = run(&[
+        "ask",
+        "--model",
+        "rag-model",
+        "--scope",
+        ws.to_str().unwrap(),
+        "--prompt",
+        "What is the lattice deployment CONFIG_VALUE AND rollout?",
+        "--deny",
+        "--use-rag",
+    ]);
+    let ask_stdout = String::from_utf8_lossy(&ask.stdout);
+    assert!(
+        ask.status.success(),
+        "ask --use-rag failed: {}",
+        String::from_utf8_lossy(&ask.stderr)
+    );
+    assert!(ask_stdout.contains("amber_lattice_42"), "{ask_stdout}");
+    assert!(ask_stdout.contains("Citation: deploy.md"), "{ask_stdout}");
+
+    // 2. Chat history is persisted and prior turns are admitted on the next turn
+    let history = tmp.path().join("history.json");
+    let hist = history.to_str().unwrap();
+    let first = run(&[
+        "chat",
+        "--model",
+        "rag-model",
+        "--prompt",
+        "First turn",
+        "--history-file",
+        hist,
+    ]);
+    assert!(first.status.success());
+    assert!(String::from_utf8_lossy(&first.stdout).contains("[History: 0/0"));
+    let second = run(&[
+        "chat",
+        "--model",
+        "rag-model",
+        "--prompt",
+        "Second turn",
+        "--history-file",
+        hist,
+    ]);
+    assert!(second.status.success());
+    assert!(String::from_utf8_lossy(&second.stdout).contains("[History: 2/2"));
+    let turns: Vec<lora_core::ChatTurn> =
+        serde_json::from_str(&fs::read_to_string(&history).unwrap()).unwrap();
+    assert_eq!(turns.len(), 4);
+    assert_eq!(turns[0].role, "user");
+    assert_eq!(turns[0].content, "First turn");
+    assert_eq!(turns[1].role, "assistant");
+
+    // 3. Interactive mode reads prompts from stdin until `/exit`
+    let mut child = Command::new(lora_bin)
+        .env("LORA_DATA_DIR", &data_dir)
+        .args([
+            "chat",
+            "--model",
+            "rag-model",
+            "--interactive",
+            "--history-file",
+            hist,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"Third turn\n\n/exit\nignored\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("[History: 4/4"));
+    let turns: Vec<lora_core::ChatTurn> =
+        serde_json::from_str(&fs::read_to_string(&history).unwrap()).unwrap();
+    assert_eq!(turns.len(), 6);
+
+    // 4. Malformed history files fail closed rather than being silently overwritten
+    fs::write(&history, "{not json").unwrap();
+    let bad = run(&[
+        "chat",
+        "--model",
+        "rag-model",
+        "--prompt",
+        "x",
+        "--history-file",
+        hist,
+    ]);
+    assert!(!bad.status.success());
+    assert_eq!(fs::read_to_string(&history).unwrap(), "{not json");
+}

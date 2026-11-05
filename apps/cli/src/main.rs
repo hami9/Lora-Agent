@@ -3,10 +3,10 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use lora_core::{
     allocate_context_budget, apply_approved_patch, classify_artifact_compatibility,
-    default_risk_register_matrix, evaluate_adapter_promotion_gate, now_epoch_ms,
-    prepare_leakage_free_splits, preview_checked_patch, validate_catalog_variant,
+    default_risk_register_matrix, evaluate_adapter_promotion_gate, format_multi_turn_prompt,
+    now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch, validate_catalog_variant,
     validate_specialist_handoff, AgentLimits, ApprovalDecision, ApprovalPromptPort,
-    ApprovalRequest, BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor,
+    ApprovalRequest, BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor, ChatTurn,
     ContextBudgetRequest, ExecutionMode, ExtensionManifestV1, HardwareProbePort,
     HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig, PatchProposal,
     PrivilegedBrokerGate, SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey,
@@ -146,15 +146,21 @@ enum Commands {
         /// Model alias, revision ID, or SHA-256 digest
         #[arg(long)]
         model: String,
-        /// User prompt text
-        #[arg(long)]
-        prompt: String,
+        /// User prompt text (required unless `--interactive`)
+        #[arg(long, required_unless_present = "interactive")]
+        prompt: Option<String>,
         /// Requested context window in tokens
         #[arg(long, default_value_t = 2048)]
         context: u32,
         /// Hardware scheduling profile
         #[arg(long, value_enum, default_value_t = ProfileArg::Automatic)]
         profile: ProfileArg,
+        /// JSON file holding prior conversation turns; loaded before and updated after each turn
+        #[arg(long)]
+        history_file: Option<PathBuf>,
+        /// Read successive prompts from stdin until EOF or `/exit`
+        #[arg(long, short = 'i')]
+        interactive: bool,
     },
 
     /// Run Read-only Assistant mode with a scoped local directory and human approval gate
@@ -177,6 +183,9 @@ enum Commands {
         /// Automatically deny tool requests
         #[arg(long)]
         deny: bool,
+        /// Ground the answer with pre-run SQLite FTS5 retrieval over indexed local memory
+        #[arg(long)]
+        use_rag: bool,
     },
 
     /// Inspect, export, or prune redacted local audit events (`docs/SECURITY_ARCHITECTURE.md`, `R17`)
@@ -422,6 +431,38 @@ fn default_data_dir() -> PathBuf {
     } else {
         std::env::temp_dir().join("lora-agent-data")
     }
+}
+
+/// Load prior conversation turns from a JSON history file; a missing file yields empty history.
+fn load_chat_history(path: Option<&std::path::Path>) -> Result<Vec<ChatTurn>, LoraError> {
+    let Some(path) = path else {
+        return Ok(Vec::new());
+    };
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(path)?;
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(&raw)
+        .map_err(|e| LoraError::Io(format!("malformed chat history file: {e}")))
+}
+
+/// Atomically persist conversation turns to a JSON history file (write-temp then rename).
+fn save_chat_history(
+    path: Option<&std::path::Path>,
+    history: &[ChatTurn],
+) -> Result<(), LoraError> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let json = serde_json::to_string_pretty(history)
+        .map_err(|e| LoraError::Io(format!("failed to serialize chat history: {e}")))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 fn main() {
@@ -727,26 +768,74 @@ fn main() {
             prompt,
             context,
             profile,
+            history_file,
+            interactive,
         } => {
-            let run_id = format!("run-chat-{}", now_epoch_ms());
-            let (plan, _outcome) = app.run_task(
-                &run_id,
-                "local-user",
-                &model,
-                context,
-                profile.into(),
-                ExecutionMode::ChatOnly,
-                None,
-                &prompt,
-                &AgentLimits::default(),
-                &cancel_flag,
-                &mut |delta| {
-                    print!("{delta}");
+            let mut history = load_chat_history(history_file.as_deref())?;
+            let profile: TuningProfile = profile.into();
+            let run_turn =
+                |user_prompt: &str, history: &mut Vec<ChatTurn>| -> Result<(), LoraError> {
+                    let reserved_output = AgentLimits::default().max_output_tokens.min(context / 2);
+                    let (formatted, admitted) =
+                        format_multi_turn_prompt(history, user_prompt, context, reserved_output)?;
+                    let run_id = format!("run-chat-{}", now_epoch_ms());
+                    let mut answer = String::new();
+                    let (plan, _outcome) = app.run_task(
+                        &run_id,
+                        "local-user",
+                        &model,
+                        context,
+                        profile,
+                        ExecutionMode::ChatOnly,
+                        None,
+                        &formatted,
+                        &AgentLimits::default(),
+                        &cancel_flag,
+                        &mut |delta| {
+                            answer.push_str(delta);
+                            print!("{delta}");
+                            let _ = io::stdout().flush();
+                            Ok(())
+                        },
+                    )?;
+                    println!(
+                        "\n\n[Plan: {}]\n[History: {admitted}/{} prior turn(s) admitted]",
+                        plan.explanation,
+                        history.len()
+                    );
+                    history.push(ChatTurn {
+                        role: "user".to_string(),
+                        content: user_prompt.to_string(),
+                    });
+                    history.push(ChatTurn {
+                        role: "assistant".to_string(),
+                        content: answer.trim().to_string(),
+                    });
+                    save_chat_history(history_file.as_deref(), history)
+                };
+
+            if let Some(p) = prompt.as_deref() {
+                run_turn(p, &mut history)?;
+            }
+            if interactive {
+                let stdin = io::stdin();
+                loop {
+                    print!("lora> ");
                     let _ = io::stdout().flush();
-                    Ok(())
-                },
-            )?;
-            println!("\n\n[Plan: {}]", plan.explanation);
+                    let mut line = String::new();
+                    if stdin.read_line(&mut line)? == 0 {
+                        break;
+                    }
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if line == "/exit" || line == "/quit" {
+                        break;
+                    }
+                    run_turn(line, &mut history)?;
+                }
+            }
             Ok(())
         }
         Commands::Ask {
@@ -754,10 +843,11 @@ fn main() {
             scope,
             prompt,
             context,
+            use_rag,
             ..
         } => {
             let run_id = format!("run-ask-{}", now_epoch_ms());
-            let (_plan, outcome) = app.run_task(
+            let (_plan, outcome) = app.run_rag_task(
                 &run_id,
                 "local-user",
                 &model,
@@ -767,6 +857,7 @@ fn main() {
                 Some(&scope),
                 &prompt,
                 &AgentLimits::default(),
+                use_rag,
                 &cancel_flag,
                 &mut |_delta| Ok(()),
             )?;

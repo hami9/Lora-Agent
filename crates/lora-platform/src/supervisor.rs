@@ -554,8 +554,9 @@ pub fn synthesize_deterministic_response(
         );
     }
 
-    // If an observation is present, inspect the untrusted data block strictly as data (ignoring any prompt injection!)
-    if let Some(obs_section) = prompt.split("[OBSERVATION_UNTRUSTED_DATA ").nth(1) {
+    // If one or more observations are present, inspect each untrusted data block strictly as data (ignoring any prompt injection!)
+    let mut last_checked: Option<(String, String)> = None;
+    for obs_section in prompt.split("[OBSERVATION_UNTRUSTED_DATA ").skip(1) {
         let path = obs_section
             .split("path=\"")
             .nth(1)
@@ -586,8 +587,11 @@ pub fn synthesize_deterministic_response(
                 return (chunks, None, FinishReason::Stop);
             }
         }
+        last_checked = Some((path.to_string(), lines.to_string()));
+    }
 
-        // If the expected evidence is absent from the observed file, report INSUFFICIENT_EVIDENCE (`M5`)
+    if let Some((path, lines)) = last_checked {
+        // If the expected evidence is absent from the observed file(s), report INSUFFICIENT_EVIDENCE (`M5`)
         let abstain = format!(
             "INSUFFICIENT_EVIDENCE: Checked [{path}#{lines}], but the requested configuration value was not present in the file."
         );

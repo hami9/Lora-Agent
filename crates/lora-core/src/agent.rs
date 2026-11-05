@@ -2,6 +2,7 @@
 //! and citation verification (`docs/AGENT_RUNTIME.md`, `T8`, `M5`, `M6`, `M7`).
 
 use crate::error::{redact_sensitive_text, LoraError};
+use crate::memory::{allocate_context_budget, ContextBudgetRequest};
 use crate::policy::{
     compute_action_digest, is_excluded_secret_resource, ExecutionMode, PolicyGate, POLICY_REVISION,
 };
@@ -126,6 +127,42 @@ impl<'a> BoundedAgentRuntime<'a> {
         cancel_flag: &Arc<AtomicBool>,
         on_delta: &mut dyn FnMut(&str) -> Result<(), LoraError>,
     ) -> Result<AgentRunOutcome, LoraError> {
+        self.execute_run_with_rag(
+            run_id,
+            principal,
+            workspace_id,
+            mode,
+            model_digest,
+            model_handle,
+            context_length,
+            user_prompt,
+            limits,
+            false,
+            worker,
+            cancel_flag,
+            on_delta,
+        )
+    }
+
+    /// Execute a bounded chat or read-only agent run with optional pre-run SQLite FTS5 lexical
+    /// retrieval and deterministic context-window budgeting (`docs/MEMORY_AND_RAG.md`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_run_with_rag(
+        &self,
+        run_id: &str,
+        principal: &str,
+        workspace_id: &str,
+        mode: ExecutionMode,
+        model_digest: &str,
+        model_handle: &str,
+        context_length: u32,
+        user_prompt: &str,
+        limits: &AgentLimits,
+        use_rag: bool,
+        worker: &mut dyn WorkerSessionPort,
+        cancel_flag: &Arc<AtomicBool>,
+        on_delta: &mut dyn FnMut(&str) -> Result<(), LoraError>,
+    ) -> Result<AgentRunOutcome, LoraError> {
         let start_instant = Instant::now();
         let deadline = Duration::from_secs(limits.run_deadline_secs);
 
@@ -156,6 +193,77 @@ impl<'a> BoundedAgentRuntime<'a> {
         let mut citations = Vec::new();
         let mut tool_calls_used = 0u32;
         let mut seen_proposals = std::collections::HashSet::new();
+
+        if use_rag && mode == ExecutionMode::ReadOnlyAssistant {
+            let candidates =
+                self.store
+                    .search_lexical_fts(workspace_id, user_prompt, 5, self.policy)?;
+            if !candidates.is_empty() {
+                let ranked_excerpts: Vec<_> = candidates
+                    .into_iter()
+                    .map(|ev| {
+                        let cost = ((ev.snippet.len() / 4) + 16) as u32;
+                        (ev, cost)
+                    })
+                    .collect();
+                let alloc = allocate_context_budget(&ContextBudgetRequest {
+                    context_window_tokens: context_length,
+                    reserved_output_tokens: limits.max_output_tokens.min(context_length / 2),
+                    control_schema_overhead_tokens: 64,
+                    user_request_tokens: ((user_prompt.len() / 4) + 1) as u32,
+                    recent_turns_tokens: 0,
+                    tool_receipts_tokens: 0,
+                    ranked_excerpts,
+                })?;
+
+                for (idx, ev) in alloc.admitted_excerpts.into_iter().enumerate() {
+                    let line_tag = format!("L{}-L{}", ev.line_range.0, ev.line_range.1);
+                    let escaped_snippet = redact_sensitive_text(&ev.snippet);
+                    current_prompt.push_str(&format!(
+                        "\n[OBSERVATION_UNTRUSTED_DATA path=\"{}\" lines=\"{}\" bytes={}..{} sha256=\"{}\" truncated=false]:\n{}\n[/OBSERVATION_UNTRUSTED_DATA]",
+                        ev.relative_path,
+                        line_tag,
+                        ev.byte_range.0,
+                        ev.byte_range.1,
+                        ev.doc_sha256,
+                        escaped_snippet
+                    ));
+
+                    let receipt = ToolReceipt {
+                        invocation_id: format!("{run_id}-rag-{}", idx + 1),
+                        outcome: "succeeded".to_string(),
+                        resource_identity: format!("fts5:{}", ev.chunk_id),
+                        relative_path: ev.relative_path.clone(),
+                        byte_range: ev.byte_range,
+                        line_range: Some(ev.line_range),
+                        excerpt_sha256: ev.doc_sha256.clone(),
+                        truncated: false,
+                        error_code: None,
+                    };
+                    self.store.append_audit(
+                        run_id,
+                        principal,
+                        POLICY_REVISION,
+                        "rag_retrieve",
+                        &ev.relative_path,
+                        "retrieve",
+                        "succeeded",
+                        &format!(
+                            "Retrieved FTS5 chunk {} ({}) from {}",
+                            ev.chunk_id, line_tag, ev.relative_path
+                        ),
+                    )?;
+                    citations.push(CitedEvidence {
+                        relative_path: ev.relative_path,
+                        line_range: Some(ev.line_range),
+                        byte_range: ev.byte_range,
+                        excerpt_sha256: ev.doc_sha256,
+                        truncated: false,
+                    });
+                    receipts.push(receipt);
+                }
+            }
+        }
 
         loop {
             if cancel_flag.load(Ordering::SeqCst) {

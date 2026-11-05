@@ -26,7 +26,7 @@
 ## Workspace Architecture
 
 ```text
-├── Cargo.toml                  # Workspace root (version = "0.1.1")
+├── Cargo.toml                  # Workspace root (version = "0.1.2")
 ├── crates/
 │   ├── lora-protocol/          # v1 32-bit BE JSON framing, closed schemas & streaming GGUF v2/v3 parser
 │   ├── lora-core/              # App service, SQLite store, registry, HIE, policy gate & RAG
@@ -108,17 +108,24 @@ lora import ./test-model.gguf --alias my-model
 # 5. Evaluate HIE admission plan for a requested context window
 lora plan --model my-model --context 2048
 
-# 6. Run local offline chat
+# 6. Run local offline chat (optionally persisting multi-turn history, or interactively)
 lora chat --model my-model --prompt "Summarize local-first safety invariants."
+lora chat --model my-model --prompt "And the next step?" --history-file ./chat.json
+lora chat --model my-model --interactive --history-file ./chat.json   # type /exit to quit
 
 # 7. Ask a scoped question against an approved workspace directory
 lora ask --model my-model --scope ./my-project --prompt "What does configuration recommend?"
+# Ground the answer with pre-indexed SQLite FTS5 evidence (run `lora index` first)
+lora ask --model my-model --scope ./my-project --prompt "What does configuration recommend?" --use-rag
 
 # 8. Check artifact compatibility against GGUF matrix
 lora compatibility --filename qwen-3b-q4_k_m.gguf
 
 # 9. Compute context window token allocation
 lora context-budget --window 2048 --output 512 --user 256
+
+# 10. Serve the desktop UI and read-only JSON view-models on loopback only
+lora-desktop --serve 127.0.0.1:8765
 ```
 
 ---
