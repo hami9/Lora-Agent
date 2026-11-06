@@ -403,10 +403,10 @@
     },
     "/v1/workflow/run": {
       "post": {
-        "summary": "Execute multi-phase workflow pipeline covering indexing, grounded reasoning, patch preview, and audit export",
+        "summary": "Execute multi-phase workflow pipeline with optional deadline timeout gating (max_duration_ms)",
         "responses": {
           "200": {
-            "description": "WorkflowExecutionReceipt detailing step outcomes, execution latency telemetry (started_at_ms, duration_ms, total_duration_ms), and pipeline status"
+            "description": "WorkflowExecutionReceipt detailing step outcomes, execution latency telemetry, deadline enforcement state (deadline_exceeded), and pipeline status"
           },
           "400": {
             "description": "Malformed workflow specification or policy denial"

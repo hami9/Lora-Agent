@@ -65,6 +65,7 @@ fn desktop_shell_view_model_csp_and_capabilities_e2e() {
     assert!(html.contains("doctor-live"));
     assert!(html.contains("workflow-live"));
     assert!(html.contains("wf-latest-duration"));
+    assert!(html.contains("wf-deadline-guard"));
 
     // 4. Verify Tauri v2 capability manifest disallows remote URLs and shell/fs ambient plugins
     let cap_raw = include_str!("../capabilities/main-window.json");
@@ -255,6 +256,7 @@ fn desktop_loopback_bridge_serves_ui_and_view_models() {
     assert!(body.contains("\"status\": \"ready\""));
     assert!(body.contains("grounded_query"));
     assert!(body.contains("doctor_probe"));
+    assert!(body.contains("\"deadline_gating\": true"));
 
     // 14. Workflow execution receipts history endpoint
     let (head, body) = get("/api/workflow-receipts");

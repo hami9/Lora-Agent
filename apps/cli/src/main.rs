@@ -430,6 +430,9 @@ enum Commands {
         /// Perform dry-run validation of pipeline configuration without execution
         #[arg(long)]
         validate: bool,
+        /// Optional maximum execution deadline in milliseconds for workflow pipeline
+        #[arg(long)]
+        max_duration_ms: Option<u64>,
     },
 }
 
@@ -1415,6 +1418,7 @@ fn main() {
             list_receipts,
             prune_keep,
             validate,
+            max_duration_ms,
         } => {
             if let Some(keep) = prune_keep {
                 let deleted = app.store.prune_workflow_receipts(keep)?;
@@ -1432,13 +1436,19 @@ fn main() {
                 } else {
                     println!("=== Recorded Workflow Receipts ({}) ===", receipts.len());
                     for (i, r) in receipts.iter().enumerate() {
+                        let dl_tag = if r.deadline_exceeded {
+                            " [EXCEEDED]"
+                        } else {
+                            ""
+                        };
                         println!(
-                            "[{}] ID: {} | Steps: {}/{} | Success: {} | Duration: {}ms | Time: {}",
+                            "[{}] ID: {} | Steps: {}/{} | Success: {}{} | Duration: {}ms | Time: {}",
                             i + 1,
                             r.workflow_id,
                             r.completed_steps,
                             r.total_steps,
                             r.successful,
+                            dl_tag,
                             r.total_duration_ms,
                             r.created_at_ms
                         );
@@ -1447,7 +1457,7 @@ fn main() {
                 return Ok(());
             }
 
-            let job_config = match config {
+            let mut job_config: WorkflowJobConfig = match config {
                 Some(path) if !demo => {
                     let raw = std::fs::read_to_string(&path)?;
                     serde_json::from_str(&raw)
@@ -1478,8 +1488,13 @@ fn main() {
                         },
                     ],
                     stop_on_failure: true,
+                    max_duration_ms: None,
                 },
             };
+
+            if let Some(lim) = max_duration_ms {
+                job_config.max_duration_ms = Some(lim);
+            }
 
             if validate {
                 let report = validate_workflow_job(&job_config);
@@ -1487,6 +1502,9 @@ fn main() {
                 println!("Workflow ID : {}", report.workflow_id);
                 println!("Total Steps : {}", report.total_steps);
                 println!("Valid       : {}", report.valid);
+                if let Some(lim) = job_config.max_duration_ms {
+                    println!("Deadline Lim: {}ms", lim);
+                }
                 println!("Step Checks :");
                 for check in &report.step_validations {
                     println!(
@@ -1518,6 +1536,11 @@ fn main() {
             println!("Completed Steps : {}", receipt.completed_steps);
             println!("Successful      : {}", receipt.successful);
             println!("Total Duration  : {}ms", receipt.total_duration_ms);
+            if receipt.deadline_exceeded {
+                println!("Deadline State  : EXCEEDED");
+            } else if job_config.max_duration_ms.is_some() {
+                println!("Deadline State  : SATISFIED");
+            }
             println!("Step Outcomes   :");
             for outcome in &receipt.step_outcomes {
                 println!(

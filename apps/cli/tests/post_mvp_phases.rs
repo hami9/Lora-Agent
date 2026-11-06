@@ -2128,6 +2128,7 @@ fn workflow_pipeline_execution_and_step_accounting() {
             },
         ],
         stop_on_failure: true,
+        max_duration_ms: None,
     };
 
     let receipt = execute_workflow_job(&cfg).expect("execute workflow");
@@ -2270,4 +2271,48 @@ fn workflow_pipeline_execution_and_step_accounting() {
     let stdout_val = String::from_utf8_lossy(&out_val.stdout);
     assert!(stdout_val.contains("Workflow Validation Receipt"));
     assert!(stdout_val.contains("Valid       : true"));
+
+    // Verify max_duration_ms validation
+    let mut bad_timeout_cfg = cfg.clone();
+    bad_timeout_cfg.max_duration_ms = Some(0);
+    let val_bad_timeout = lora_core::validate_workflow_job(&bad_timeout_cfg);
+    assert!(!val_bad_timeout.valid);
+    assert!(val_bad_timeout
+        .issues
+        .iter()
+        .any(|i| i.contains("max_duration_ms must be positive")));
+
+    // Verify deadline enforcement abort when duration budget is exceeded
+    let mut timeout_cfg = cfg.clone();
+    timeout_cfg.workflow_id = "wf-timeout-01".to_string();
+    timeout_cfg.max_duration_ms = Some(1);
+    for i in 0..3000 {
+        timeout_cfg.steps.push(WorkflowStepKind::IndexWorkspace {
+            workspace_id: format!("ws-{i}"),
+            relative_path: "docs/ARCHITECTURE.md".to_string(),
+        });
+    }
+    let timeout_receipt = execute_workflow_job(&timeout_cfg).expect("execute timeout workflow");
+    assert!(!timeout_receipt.successful);
+    assert!(timeout_receipt.deadline_exceeded);
+    assert!(timeout_receipt
+        .step_outcomes
+        .iter()
+        .any(|o| o.step_kind == "deadline_exceeded"));
+
+    // Verify CLI workflow --demo --max-duration-ms 10000
+    let out_demo_dl = std::process::Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "workflow",
+            "--demo",
+            "--max-duration-ms",
+            "10000",
+        ])
+        .output()
+        .expect("run lora workflow --demo --max-duration-ms 10000");
+    assert!(out_demo_dl.status.success());
+    let stdout_demo_dl = String::from_utf8_lossy(&out_demo_dl.stdout);
+    assert!(stdout_demo_dl.contains("Deadline State  : SATISFIED"));
 }

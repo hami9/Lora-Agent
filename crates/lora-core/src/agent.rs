@@ -901,6 +901,8 @@ pub struct WorkflowJobConfig {
     pub title: String,
     pub steps: Vec<WorkflowStepKind>,
     pub stop_on_failure: bool,
+    #[serde(default)]
+    pub max_duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -925,6 +927,8 @@ pub struct WorkflowExecutionReceipt {
     pub created_at_ms: u64,
     #[serde(default)]
     pub total_duration_ms: u64,
+    #[serde(default)]
+    pub deadline_exceeded: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -954,6 +958,9 @@ pub fn validate_workflow_job(config: &WorkflowJobConfig) -> WorkflowValidationRe
     }
     if config.steps.is_empty() {
         issues.push("workflow requires at least one step".to_string());
+    }
+    if let Some(0) = config.max_duration_ms {
+        issues.push("max_duration_ms must be positive when specified".to_string());
     }
 
     for (idx, step) in config.steps.iter().enumerate() {
@@ -1107,12 +1114,40 @@ pub fn execute_workflow_job(
             "workflow requires at least one step".to_string(),
         ));
     }
+    if let Some(0) = config.max_duration_ms {
+        return Err(LoraError::PolicyDenied(
+            "workflow max_duration_ms must be positive when specified".to_string(),
+        ));
+    }
 
     let job_start = crate::store::now_epoch_ms();
     let mut outcomes = Vec::new();
     let mut all_success = true;
+    let mut deadline_exceeded = false;
 
     for (idx, step) in config.steps.iter().enumerate() {
+        let elapsed_before = crate::store::now_epoch_ms().saturating_sub(job_start);
+        if let Some(max_ms) = config.max_duration_ms {
+            if elapsed_before >= max_ms {
+                all_success = false;
+                deadline_exceeded = true;
+                outcomes.push(WorkflowStepOutcome {
+                    step_index: idx,
+                    step_kind: "deadline_exceeded".to_string(),
+                    success: false,
+                    detail: format!(
+                        "execution deadline exceeded before step {} (elapsed {}ms >= limit {}ms)",
+                        idx + 1,
+                        elapsed_before,
+                        max_ms
+                    ),
+                    started_at_ms: crate::store::now_epoch_ms(),
+                    duration_ms: 0,
+                });
+                break;
+            }
+        }
+
         let step_start = crate::store::now_epoch_ms();
         let (kind_name, success, detail) = match step {
             WorkflowStepKind::DoctorProbe {
@@ -1230,9 +1265,39 @@ pub fn execute_workflow_job(
         if !success && config.stop_on_failure {
             break;
         }
+
+        if let Some(max_ms) = config.max_duration_ms {
+            let elapsed_after = crate::store::now_epoch_ms().saturating_sub(job_start);
+            if elapsed_after >= max_ms {
+                deadline_exceeded = true;
+                if idx + 1 < config.steps.len() {
+                    all_success = false;
+                    outcomes.push(WorkflowStepOutcome {
+                        step_index: idx + 1,
+                        step_kind: "deadline_exceeded".to_string(),
+                        success: false,
+                        detail: format!(
+                            "execution deadline exceeded after step {} (elapsed {}ms >= limit {}ms)",
+                            idx + 1,
+                            elapsed_after,
+                            max_ms
+                        ),
+                        started_at_ms: crate::store::now_epoch_ms(),
+                        duration_ms: 0,
+                    });
+                    break;
+                }
+            }
+        }
     }
 
     let total_duration_ms = crate::store::now_epoch_ms().saturating_sub(job_start);
+    if let Some(max_ms) = config.max_duration_ms {
+        if total_duration_ms >= max_ms {
+            deadline_exceeded = true;
+            all_success = false;
+        }
+    }
 
     Ok(WorkflowExecutionReceipt {
         workflow_id: config.workflow_id.clone(),
@@ -1242,5 +1307,6 @@ pub fn execute_workflow_job(
         step_outcomes: outcomes,
         created_at_ms: job_start,
         total_duration_ms,
+        deadline_exceeded,
     })
 }
