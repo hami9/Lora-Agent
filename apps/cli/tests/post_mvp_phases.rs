@@ -2130,6 +2130,7 @@ fn workflow_pipeline_execution_and_step_accounting() {
         stop_on_failure: true,
         max_duration_ms: None,
         max_step_retries: None,
+        non_fatal_step_indices: None,
     };
 
     let receipt = execute_workflow_job(&cfg).expect("execute workflow");
@@ -2140,6 +2141,7 @@ fn workflow_pipeline_execution_and_step_accounting() {
     assert_eq!(receipt.step_outcomes.len(), 5);
     assert!(receipt.step_outcomes[0].success);
     assert_eq!(receipt.step_outcomes[0].attempts, 1);
+    assert!(!receipt.step_outcomes[0].non_fatal);
     assert!(receipt.step_outcomes[0].started_at_ms > 0);
     assert!(receipt.step_outcomes[1].success);
     assert!(receipt.step_outcomes[2].success);
@@ -2168,6 +2170,7 @@ fn workflow_pipeline_execution_and_step_accounting() {
     assert_eq!(parsed_legacy.step_outcomes[0].started_at_ms, 0);
     assert_eq!(parsed_legacy.step_outcomes[0].duration_ms, 0);
     assert_eq!(parsed_legacy.step_outcomes[0].attempts, 1);
+    assert!(!parsed_legacy.step_outcomes[0].non_fatal);
 
     // Verify persistent storage and retrieval in SqliteStore
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -2340,6 +2343,7 @@ fn workflow_pipeline_execution_and_step_accounting() {
         stop_on_failure: true,
         max_duration_ms: None,
         max_step_retries: Some(2),
+        non_fatal_step_indices: None,
     };
     let retry_receipt = execute_workflow_job(&retry_job).expect("execute retry job");
     assert!(!retry_receipt.successful);
@@ -2365,4 +2369,93 @@ fn workflow_pipeline_execution_and_step_accounting() {
     let stdout_demo_retries = String::from_utf8_lossy(&out_demo_retries.stdout);
     assert!(stdout_demo_retries.contains("Workflow Execution Receipt"));
     assert!(stdout_demo_retries.contains("Successful      : true"));
+
+    // Verify WorkflowStepKind::VerifyDigest execution and validation
+    let sample_file = tmp.path().join("digest_fixture.txt");
+    std::fs::write(&sample_file, b"lora agent payload 2026").expect("write fixture");
+    use sha2::{Digest, Sha256};
+    let valid_sha = hex::encode(Sha256::digest(b"lora agent payload 2026"));
+    let mismatch_sha =
+        "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+
+    let digest_job = WorkflowJobConfig {
+        workflow_id: "wf-digest-check".to_string(),
+        title: "Digest Check".to_string(),
+        steps: vec![
+            WorkflowStepKind::VerifyDigest {
+                target_file: sample_file.to_str().unwrap().to_string(),
+                expected_sha256: valid_sha.clone(),
+            },
+            WorkflowStepKind::VerifyDigest {
+                target_file: sample_file.to_str().unwrap().to_string(),
+                expected_sha256: mismatch_sha,
+            },
+        ],
+        stop_on_failure: false,
+        max_duration_ms: None,
+        max_step_retries: None,
+        non_fatal_step_indices: None,
+    };
+    let digest_receipt = execute_workflow_job(&digest_job).expect("execute digest job");
+    assert_eq!(digest_receipt.step_outcomes.len(), 2);
+    assert!(digest_receipt.step_outcomes[0].success);
+    assert!(digest_receipt.step_outcomes[0]
+        .detail
+        .contains("cryptographic digest verified"));
+    assert!(!digest_receipt.step_outcomes[1].success);
+    assert!(digest_receipt.step_outcomes[1]
+        .detail
+        .contains("digest mismatch"));
+
+    // Verify non_fatal_step_indices allows pipeline completion despite step failure
+    let mut bad_nf_cfg = cfg.clone();
+    bad_nf_cfg.non_fatal_step_indices = Some(vec![99]);
+    let val_bad_nf = lora_core::validate_workflow_job(&bad_nf_cfg);
+    assert!(!val_bad_nf.valid);
+    assert!(val_bad_nf
+        .issues
+        .iter()
+        .any(|i| i.contains("non_fatal_step_index 99 out of bounds")));
+    assert!(execute_workflow_job(&bad_nf_cfg).is_err());
+
+    let non_fatal_job = WorkflowJobConfig {
+        workflow_id: "wf-non-fatal-demo".to_string(),
+        title: "Non-Fatal Demo".to_string(),
+        steps: vec![
+            WorkflowStepKind::DoctorProbe {
+                min_available_ram_mb: Some(0), // Fails intentionally
+            },
+            WorkflowStepKind::DoctorProbe {
+                min_available_ram_mb: Some(512), // Passes
+            },
+        ],
+        stop_on_failure: true,
+        max_duration_ms: None,
+        max_step_retries: None,
+        non_fatal_step_indices: Some(vec![0]),
+    };
+    let nf_receipt = execute_workflow_job(&non_fatal_job).expect("execute non-fatal job");
+    assert!(nf_receipt.successful);
+    assert_eq!(nf_receipt.completed_steps, 2);
+    assert!(!nf_receipt.step_outcomes[0].success);
+    assert!(nf_receipt.step_outcomes[0].non_fatal);
+    assert!(nf_receipt.step_outcomes[0].detail.contains("[non-fatal]"));
+    assert!(nf_receipt.step_outcomes[1].success);
+
+    // Verify CLI workflow --demo --non-fatal-steps 0
+    let out_demo_nf = std::process::Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "workflow",
+            "--demo",
+            "--non-fatal-steps",
+            "0",
+        ])
+        .output()
+        .expect("run lora workflow --demo --non-fatal-steps 0");
+    assert!(out_demo_nf.status.success());
+    let stdout_demo_nf = String::from_utf8_lossy(&out_demo_nf.stdout);
+    assert!(stdout_demo_nf.contains("Workflow Execution Receipt"));
+    assert!(stdout_demo_nf.contains("Successful      : true"));
 }

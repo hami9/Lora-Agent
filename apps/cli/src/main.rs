@@ -436,6 +436,9 @@ enum Commands {
         /// Optional maximum transient failure retries per step (capped at 10)
         #[arg(long)]
         max_step_retries: Option<u32>,
+        /// Optional comma-separated 0-based step indices that do not abort pipeline on failure
+        #[arg(long, value_delimiter = ',')]
+        non_fatal_steps: Option<Vec<usize>>,
     },
 }
 
@@ -1423,6 +1426,7 @@ fn main() {
             validate,
             max_duration_ms,
             max_step_retries,
+            non_fatal_steps,
         } => {
             if let Some(keep) = prune_keep {
                 let deleted = app.store.prune_workflow_receipts(keep)?;
@@ -1494,6 +1498,7 @@ fn main() {
                     stop_on_failure: true,
                     max_duration_ms: None,
                     max_step_retries: None,
+                    non_fatal_step_indices: None,
                 },
             };
 
@@ -1502,6 +1507,9 @@ fn main() {
             }
             if let Some(retries) = max_step_retries {
                 job_config.max_step_retries = Some(retries);
+            }
+            if let Some(indices) = non_fatal_steps {
+                job_config.non_fatal_step_indices = Some(indices);
             }
 
             if validate {
@@ -1515,6 +1523,9 @@ fn main() {
                 }
                 if let Some(retries) = job_config.max_step_retries {
                     println!("Max Retries : {} per step", retries);
+                }
+                if let Some(ref nf) = job_config.non_fatal_step_indices {
+                    println!("Non-Fatal   : {:?}", nf);
                 }
                 println!("Step Checks :");
                 for check in &report.step_validations {
@@ -1559,8 +1570,13 @@ fn main() {
                 } else {
                     String::new()
                 };
+                let nf_tag = if outcome.non_fatal {
+                    " [non-fatal]"
+                } else {
+                    ""
+                };
                 println!(
-                    "  [{}] {} -> success: {} (took {}ms){retry_tag} ({})",
+                    "  [{}] {} -> success: {} (took {}ms){retry_tag}{nf_tag} ({})",
                     outcome.step_index + 1,
                     outcome.step_kind,
                     outcome.success,

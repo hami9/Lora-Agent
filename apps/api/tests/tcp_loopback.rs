@@ -892,6 +892,7 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r49.contains("\"duration_ms\":"));
     assert!(r49.contains("\"deadline_exceeded\":false"));
     assert!(r49.contains("\"attempts\":1"));
+    assert!(r49.contains("\"non_fatal\":false"));
 
     // (au) POST /v1/workflow/run rejects empty steps list
     let body_wf_bad = serde_json::json!({

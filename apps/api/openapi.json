@@ -403,10 +403,10 @@
     },
     "/v1/workflow/run": {
       "post": {
-        "summary": "Execute multi-phase workflow pipeline with optional deadline timeout gating (max_duration_ms) and transient failure retry policies (max_step_retries)",
+        "summary": "Execute multi-phase workflow pipeline with optional deadline timeout gating (max_duration_ms), transient failure retries (max_step_retries), non-fatal steps, and cryptographic verify_digest steps",
         "responses": {
           "200": {
-            "description": "WorkflowExecutionReceipt detailing step outcomes with attempt counts, execution latency telemetry, deadline enforcement state (deadline_exceeded), and pipeline status"
+            "description": "WorkflowExecutionReceipt detailing step outcomes with attempt counts, non-fatal flags, latency telemetry, deadline enforcement state (deadline_exceeded), and pipeline status"
           },
           "400": {
             "description": "Malformed workflow specification or policy denial"

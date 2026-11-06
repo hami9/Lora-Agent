@@ -13,6 +13,7 @@ use crate::ports::{
 use crate::store::{RunState, SqliteStore};
 use lora_protocol::ToolProposalWire;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -893,6 +894,10 @@ pub enum WorkflowStepKind {
     AuditExport {
         output_path: String,
     },
+    VerifyDigest {
+        target_file: String,
+        expected_sha256: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -905,6 +910,8 @@ pub struct WorkflowJobConfig {
     pub max_duration_ms: Option<u64>,
     #[serde(default)]
     pub max_step_retries: Option<u32>,
+    #[serde(default)]
+    pub non_fatal_step_indices: Option<Vec<usize>>,
 }
 
 fn default_step_attempts() -> u32 {
@@ -923,6 +930,8 @@ pub struct WorkflowStepOutcome {
     pub duration_ms: u64,
     #[serde(default = "default_step_attempts")]
     pub attempts: u32,
+    #[serde(default)]
+    pub non_fatal: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -973,6 +982,17 @@ pub fn validate_workflow_job(config: &WorkflowJobConfig) -> WorkflowValidationRe
     if let Some(retries) = config.max_step_retries {
         if retries > 10 {
             issues.push("max_step_retries must not exceed 10".to_string());
+        }
+    }
+    if let Some(ref non_fatal) = config.non_fatal_step_indices {
+        for &idx in non_fatal {
+            if idx >= config.steps.len() {
+                issues.push(format!(
+                    "non_fatal_step_index {} out of bounds (total steps: {})",
+                    idx,
+                    config.steps.len()
+                ));
+            }
         }
     }
 
@@ -1094,6 +1114,37 @@ pub fn validate_workflow_job(config: &WorkflowJobConfig) -> WorkflowValidationRe
                     )
                 }
             }
+            WorkflowStepKind::VerifyDigest {
+                target_file,
+                expected_sha256,
+            } => {
+                if target_file.trim().is_empty() {
+                    ("verify_digest", false, "empty target_file path".to_string())
+                } else if target_file.contains("..")
+                    || target_file.starts_with('/')
+                    || target_file.starts_with('\\')
+                {
+                    (
+                        "verify_digest",
+                        false,
+                        "scope escape in target_file path".to_string(),
+                    )
+                } else if expected_sha256.len() != 64
+                    || !expected_sha256.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    (
+                        "verify_digest",
+                        false,
+                        "invalid expected_sha256 format (must be 64-char hex string)".to_string(),
+                    )
+                } else {
+                    (
+                        "verify_digest",
+                        true,
+                        format!("valid digest check specification for {target_file}"),
+                    )
+                }
+            }
         };
 
         if !valid {
@@ -1142,6 +1193,16 @@ pub fn execute_workflow_job(
             ));
         }
     }
+    if let Some(ref non_fatal) = config.non_fatal_step_indices {
+        for &idx in non_fatal {
+            if idx >= config.steps.len() {
+                return Err(LoraError::PolicyDenied(format!(
+                    "workflow non_fatal_step_index {} out of bounds",
+                    idx
+                )));
+            }
+        }
+    }
 
     let job_start = crate::store::now_epoch_ms();
     let mut outcomes = Vec::new();
@@ -1149,6 +1210,12 @@ pub fn execute_workflow_job(
     let mut deadline_exceeded = false;
 
     for (idx, step) in config.steps.iter().enumerate() {
+        let is_non_fatal = config
+            .non_fatal_step_indices
+            .as_ref()
+            .map(|indices| indices.contains(&idx))
+            .unwrap_or(false);
+
         let elapsed_before = crate::store::now_epoch_ms().saturating_sub(job_start);
         if let Some(max_ms) = config.max_duration_ms {
             if elapsed_before >= max_ms {
@@ -1167,6 +1234,7 @@ pub fn execute_workflow_job(
                     started_at_ms: crate::store::now_epoch_ms(),
                     duration_ms: 0,
                     attempts: 1,
+                    non_fatal: false,
                 });
                 break;
             }
@@ -1295,6 +1363,64 @@ pub fn execute_workflow_job(
                         )
                     }
                 }
+                WorkflowStepKind::VerifyDigest {
+                    target_file,
+                    expected_sha256,
+                } => {
+                    if target_file.trim().is_empty() {
+                        (
+                            "verify_digest".to_string(),
+                            false,
+                            "empty target_file path".to_string(),
+                        )
+                    } else if target_file.contains("..")
+                        || target_file.starts_with('/')
+                        || target_file.starts_with('\\')
+                    {
+                        (
+                            "verify_digest".to_string(),
+                            false,
+                            "scope escape in target_file path".to_string(),
+                        )
+                    } else if expected_sha256.len() != 64
+                        || !expected_sha256.chars().all(|c| c.is_ascii_hexdigit())
+                    {
+                        (
+                            "verify_digest".to_string(),
+                            false,
+                            "invalid expected_sha256 format (must be 64-char hex string)"
+                                .to_string(),
+                        )
+                    } else {
+                        match std::fs::read(target_file) {
+                            Ok(bytes) => {
+                                let actual_sha = hex::encode(Sha256::digest(&bytes));
+                                if actual_sha.eq_ignore_ascii_case(expected_sha256) {
+                                    (
+                                        "verify_digest".to_string(),
+                                        true,
+                                        format!(
+                                            "cryptographic digest verified for {target_file} ({expected_sha256})"
+                                        ),
+                                    )
+                                } else {
+                                    (
+                                        "verify_digest".to_string(),
+                                        false,
+                                        format!(
+                                            "digest mismatch for {target_file}: expected {expected_sha256}, got {actual_sha}"
+                                        ),
+                                    )
+                                }
+                            }
+                            Err(_) => (
+                                "verify_digest".to_string(),
+                                false,
+                                format!("target file not found: {target_file}"),
+                            ),
+                        }
+                    }
+                }
             };
 
             final_kind = kind_name;
@@ -1317,11 +1443,11 @@ pub fn execute_workflow_job(
 
         let step_duration = crate::store::now_epoch_ms().saturating_sub(step_start);
 
-        if !final_success {
+        if !final_success && !is_non_fatal {
             all_success = false;
         }
 
-        let annotated_detail = if attempts > 1 {
+        let mut annotated_detail = if attempts > 1 {
             if final_success {
                 format!("{final_detail} (succeeded on attempt {attempts})")
             } else {
@@ -1331,6 +1457,10 @@ pub fn execute_workflow_job(
             final_detail
         };
 
+        if !final_success && is_non_fatal {
+            annotated_detail = format!("{annotated_detail} [non-fatal]");
+        }
+
         outcomes.push(WorkflowStepOutcome {
             step_index: idx,
             step_kind: final_kind,
@@ -1339,9 +1469,10 @@ pub fn execute_workflow_job(
             started_at_ms: step_start,
             duration_ms: step_duration,
             attempts,
+            non_fatal: is_non_fatal,
         });
 
-        if !final_success && config.stop_on_failure {
+        if !final_success && config.stop_on_failure && !is_non_fatal {
             break;
         }
 
@@ -1364,6 +1495,7 @@ pub fn execute_workflow_job(
                         started_at_ms: crate::store::now_epoch_ms(),
                         duration_ms: 0,
                         attempts: 1,
+                        non_fatal: false,
                     });
                     break;
                 }
