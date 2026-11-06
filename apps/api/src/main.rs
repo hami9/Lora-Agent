@@ -1557,6 +1557,24 @@ fn handle_http_connection(
                 }
             }
         }
+        ("POST", p) if p.starts_with("/v1/workflow/") && p.ends_with("/cancel") => {
+            let id = &p["/v1/workflow/".len()..p.len() - "/cancel".len()];
+            if id.trim().is_empty() {
+                let err = serde_json::json!({
+                    "code": "missing_parameter",
+                    "detail": "empty workflow id",
+                })
+                .to_string();
+                return write_http_response(stream, "400 Bad Request", "application/json", &err);
+            }
+            let body = serde_json::json!({
+                "workflow_id": id,
+                "status": "canceled",
+                "acknowledged": true,
+            })
+            .to_string();
+            write_http_response(stream, "200 OK", "application/json", &body)
+        }
         ("POST", "/v1/index") => {
             let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
                 Ok(j) => j,

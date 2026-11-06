@@ -2088,6 +2088,15 @@ fn cli_catalog_context_budget_and_broker_execution() {
     assert!(out_handoff.status.success());
     let stdout_handoff = String::from_utf8_lossy(&out_handoff.stdout);
     assert!(stdout_handoff.contains("Specialist handoff verified: run-parent-42 -> run-child-43"));
+
+    // 6. Workflow execution via CLI
+    let out_wf = run(&["workflow", "--demo"]);
+    assert!(out_wf.status.success());
+    let stdout_wf = String::from_utf8_lossy(&out_wf.stdout);
+    assert!(stdout_wf.contains("Workflow Execution Receipt"));
+    assert!(stdout_wf.contains("Total Steps     : 4"));
+    assert!(stdout_wf.contains("Completed Steps : 4"));
+    assert!(stdout_wf.contains("Successful      : true"));
 }
 
 #[test]

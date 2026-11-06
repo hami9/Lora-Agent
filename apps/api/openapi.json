@@ -413,6 +413,19 @@
           }
         }
       }
+    },
+    "/v1/workflow/{id}/cancel": {
+      "post": {
+        "summary": "Cancel an active or queued multi-step workflow pipeline execution",
+        "responses": {
+          "200": {
+            "description": "Workflow cancellation acknowledged"
+          },
+          "400": {
+            "description": "Empty workflow id or malformed request"
+          }
+        }
+      }
     }
   }
 }

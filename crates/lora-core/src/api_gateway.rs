@@ -355,6 +355,7 @@ impl ApiRunManager {
                 "models.classify".to_string(),
                 "system.doctor".to_string(),
                 "workflow.run".to_string(),
+                "workflow.cancel".to_string(),
             ],
             max_request_bytes: 1024 * 1024,
             sse_replay_window_events: self.max_replay_events,

@@ -3,15 +3,15 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use lora_core::{
     allocate_context_budget, apply_approved_patch, classify_artifact_compatibility,
-    default_risk_register_matrix, evaluate_adapter_promotion_gate, format_multi_turn_prompt,
-    now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
-    validate_catalog_variant, validate_specialist_handoff, AgentLimits, ApprovalDecision,
-    ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit, BrokerVerb,
+    default_risk_register_matrix, evaluate_adapter_promotion_gate, execute_workflow_job,
+    format_multi_turn_prompt, now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch,
+    rollback_applied_patch, validate_catalog_variant, validate_specialist_handoff, AgentLimits,
+    ApprovalDecision, ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit, BrokerVerb,
     CatalogVariantDescriptor, ChatTurn, CompensatingPatchReceipt, ContextBudgetRequest,
     ExecutionMode, ExtensionManifestV1, HardwareProbePort, HeldOutEvaluationReceipt,
     LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
     SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
-    DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
+    WorkflowJobConfig, WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -410,6 +410,16 @@ enum Commands {
         /// Comma-separated workspace root IDs requested for the child run
         #[arg(long, value_delimiter = ',')]
         requested_roots: Vec<String>,
+    },
+
+    /// Execute a multi-step workflow pipeline or built-in verification demo (`docs/AGENT_RUNTIME.md`)
+    Workflow {
+        /// Optional path to a WorkflowJobConfig JSON file
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Run built-in 4-step pipeline verification demo
+        #[arg(long)]
+        demo: bool,
     },
 }
 
@@ -1387,6 +1397,56 @@ fn main() {
                 "Specialist handoff verified: {} -> {} (depth {}/{})",
                 env.parent_run_id, env.child_run_id, env.depth, env.max_depth
             );
+            Ok(())
+        }
+        Commands::Workflow { config, demo } => {
+            let job_config = match config {
+                Some(path) if !demo => {
+                    let raw = std::fs::read_to_string(&path)?;
+                    serde_json::from_str(&raw)
+                        .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?
+                }
+                _ => WorkflowJobConfig {
+                    workflow_id: format!("wf-demo-{}", now_epoch_ms()),
+                    title: "Lora Agent Built-in Demo Pipeline".to_string(),
+                    steps: vec![
+                        WorkflowStepKind::IndexWorkspace {
+                            workspace_id: "ws-demo".to_string(),
+                            relative_path: "docs/ARCHITECTURE.md".to_string(),
+                        },
+                        WorkflowStepKind::GroundedQuery {
+                            query: "What is the policy gate revision?".to_string(),
+                            model: "qwen2.5-coder-7b".to_string(),
+                            context_tokens: 2048,
+                        },
+                        WorkflowStepKind::PreviewPatch {
+                            target_file: "docs/TEST.md".to_string(),
+                            replacement: "updated content".to_string(),
+                        },
+                        WorkflowStepKind::AuditExport {
+                            output_path: "audit_pipeline.json".to_string(),
+                        },
+                    ],
+                    stop_on_failure: true,
+                },
+            };
+
+            let receipt = execute_workflow_job(&job_config)?;
+            println!("=== Workflow Execution Receipt ===");
+            println!("Workflow ID     : {}", receipt.workflow_id);
+            println!("Total Steps     : {}", receipt.total_steps);
+            println!("Completed Steps : {}", receipt.completed_steps);
+            println!("Successful      : {}", receipt.successful);
+            println!("Step Outcomes   :");
+            for outcome in &receipt.step_outcomes {
+                println!(
+                    "  [{}] {} -> success: {} ({})",
+                    outcome.step_index + 1,
+                    outcome.step_kind,
+                    outcome.success,
+                    outcome.detail
+                );
+            }
             Ok(())
         }
         Commands::GenerateFixture { .. } => unreachable!(),

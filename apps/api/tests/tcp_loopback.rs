@@ -38,6 +38,7 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(openapi_str.contains("\"/v1/models/classify\""));
     assert!(openapi_str.contains("\"/v1/agent/handoff\""));
     assert!(openapi_str.contains("\"/v1/workflow/run\""));
+    assert!(openapi_str.contains("\"/v1/workflow/{id}/cancel\""));
 
     // 2. Spawn live `lora-api --once` on loopback port and send authenticated GET /v1/capabilities
     let bind_addr = find_free_loopback_addr();
@@ -83,6 +84,7 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(resp.contains("\"models.classify\""));
     assert!(resp.contains("\"system.doctor\""));
     assert!(resp.contains("\"workflow.run\""));
+    assert!(resp.contains("\"workflow.cancel\""));
 
     // 3. Import a synthetic GGUF fixture into the store so we can test live execution over TCP
     {
@@ -144,7 +146,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "50",
+            "51",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -903,6 +905,14 @@ fn loopback_api_live_tcp_socket_e2e() {
     ));
     assert!(r50.starts_with("HTTP/1.1 400 Bad Request"));
     assert!(r50.contains("policy_denied"));
+
+    // (av) POST /v1/workflow/{id}/cancel cancels workflow
+    let r51 = send_http(&format!(
+        "POST /v1/workflow/wf-test-01/cancel HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: 0\r\n\r\n"
+    ));
+    assert!(r51.starts_with("HTTP/1.1 200 OK"));
+    assert!(r51.contains("\"workflow_id\":\"wf-test-01\""));
+    assert!(r51.contains("\"status\":\"canceled\""));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());
