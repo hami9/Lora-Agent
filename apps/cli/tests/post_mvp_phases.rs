@@ -2094,8 +2094,8 @@ fn cli_catalog_context_budget_and_broker_execution() {
     assert!(out_wf.status.success());
     let stdout_wf = String::from_utf8_lossy(&out_wf.stdout);
     assert!(stdout_wf.contains("Workflow Execution Receipt"));
-    assert!(stdout_wf.contains("Total Steps     : 4"));
-    assert!(stdout_wf.contains("Completed Steps : 4"));
+    assert!(stdout_wf.contains("Total Steps     : 5"));
+    assert!(stdout_wf.contains("Completed Steps : 5"));
     assert!(stdout_wf.contains("Successful      : true"));
 }
 
@@ -2107,6 +2107,9 @@ fn workflow_pipeline_execution_and_step_accounting() {
         workflow_id: "wf-pipeline-01".to_string(),
         title: "E2E Workflow Test".to_string(),
         steps: vec![
+            WorkflowStepKind::DoctorProbe {
+                min_available_ram_mb: Some(512),
+            },
             WorkflowStepKind::IndexWorkspace {
                 workspace_id: "ws-test".to_string(),
                 relative_path: "docs/ARCHITECTURE.md".to_string(),
@@ -2128,14 +2131,15 @@ fn workflow_pipeline_execution_and_step_accounting() {
     };
 
     let receipt = execute_workflow_job(&cfg).expect("execute workflow");
-    assert_eq!(receipt.total_steps, 4);
-    assert_eq!(receipt.completed_steps, 4);
+    assert_eq!(receipt.total_steps, 5);
+    assert_eq!(receipt.completed_steps, 5);
     assert!(receipt.successful);
-    assert_eq!(receipt.step_outcomes.len(), 4);
+    assert_eq!(receipt.step_outcomes.len(), 5);
     assert!(receipt.step_outcomes[0].success);
     assert!(receipt.step_outcomes[1].success);
     assert!(receipt.step_outcomes[2].success);
     assert!(receipt.step_outcomes[3].success);
+    assert!(receipt.step_outcomes[4].success);
 
     // Verify persistent storage and retrieval in SqliteStore
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -2150,13 +2154,13 @@ fn workflow_pipeline_execution_and_step_accounting() {
         .expect("list receipts");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].workflow_id, "wf-pipeline-01");
-    assert_eq!(listed[0].total_steps, 4);
+    assert_eq!(listed[0].total_steps, 5);
 
     let found = store
         .find_workflow_receipt("wf-pipeline-01")
         .expect("find receipt");
     assert!(found.is_some());
-    assert_eq!(found.unwrap().completed_steps, 4);
+    assert_eq!(found.unwrap().completed_steps, 5);
 
     let missing = store
         .find_workflow_receipt("non-existent")
@@ -2191,4 +2195,20 @@ fn workflow_pipeline_execution_and_step_accounting() {
     assert!(out_list.status.success());
     let stdout_list = String::from_utf8_lossy(&out_list.stdout);
     assert!(stdout_list.contains("Recorded Workflow Receipts"));
+
+    // Verify CLI workflow --prune-keep
+    let out_prune = std::process::Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "workflow",
+            "--prune-keep",
+            "1",
+        ])
+        .output()
+        .expect("run lora workflow --prune-keep");
+    assert!(out_prune.status.success());
+    let stdout_prune = String::from_utf8_lossy(&out_prune.stdout);
+    assert!(stdout_prune.contains("Pruned"));
+    assert!(stdout_prune.contains("retained latest 1"));
 }

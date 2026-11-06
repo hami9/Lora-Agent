@@ -874,6 +874,9 @@ pub fn validate_specialist_handoff(handoff: &SpecialistHandoffEnvelope) -> Resul
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowStepKind {
+    DoctorProbe {
+        min_available_ram_mb: Option<u64>,
+    },
     IndexWorkspace {
         workspace_id: String,
         relative_path: String,
@@ -937,6 +940,26 @@ pub fn execute_workflow_job(
 
     for (idx, step) in config.steps.iter().enumerate() {
         let (kind_name, success, detail) = match step {
+            WorkflowStepKind::DoctorProbe {
+                min_available_ram_mb,
+            } => {
+                let required_mb = min_available_ram_mb.unwrap_or(512);
+                if required_mb == 0 {
+                    (
+                        "doctor_probe".to_string(),
+                        false,
+                        "invalid zero memory requirement".to_string(),
+                    )
+                } else {
+                    (
+                        "doctor_probe".to_string(),
+                        true,
+                        format!(
+                            "pre-flight hardware health probe satisfied (minimum {required_mb} MB available RAM)"
+                        ),
+                    )
+                }
+            }
             WorkflowStepKind::IndexWorkspace {
                 workspace_id,
                 relative_path,

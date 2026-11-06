@@ -244,6 +244,7 @@ fn route_request(
                 "status": "ready",
                 "active_pipeline": null,
                 "supported_steps": [
+                    "doctor_probe",
                     "index_workspace",
                     "grounded_query",
                     "preview_patch",

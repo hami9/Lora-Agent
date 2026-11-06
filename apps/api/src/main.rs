@@ -1641,6 +1641,51 @@ fn handle_http_connection(
                 }
             }
         }
+        ("POST", "/v1/workflow/receipts/prune") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let keep_latest = req_json
+                .get("keep_latest")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(50) as usize;
+            match app.store.prune_workflow_receipts(keep_latest) {
+                Ok(deleted) => {
+                    let body = serde_json::json!({
+                        "deleted": deleted,
+                        "retained": keep_latest
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    )
+                }
+            }
+        }
         ("POST", "/v1/index") => {
             let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
                 Ok(j) => j,

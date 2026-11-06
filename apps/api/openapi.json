@@ -449,6 +449,19 @@
           }
         }
       }
+    },
+    "/v1/workflow/receipts/prune": {
+      "post": {
+        "summary": "Prune older persistent workflow execution receipts retaining most recent N records",
+        "responses": {
+          "200": {
+            "description": "Workflow receipts pruned successfully"
+          },
+          "400": {
+            "description": "Malformed prune request"
+          }
+        }
+      }
     }
   }
 }

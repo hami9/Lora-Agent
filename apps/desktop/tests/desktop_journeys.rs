@@ -253,6 +253,7 @@ fn desktop_loopback_bridge_serves_ui_and_view_models() {
     assert!(head.starts_with("HTTP/1.1 200"));
     assert!(body.contains("\"status\": \"ready\""));
     assert!(body.contains("grounded_query"));
+    assert!(body.contains("doctor_probe"));
 
     // 14. Workflow execution receipts history endpoint
     let (head, body) = get("/api/workflow-receipts");

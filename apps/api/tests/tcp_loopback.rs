@@ -146,7 +146,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "54",
+            "55",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -937,6 +937,16 @@ fn loopback_api_live_tcp_socket_e2e() {
     ));
     assert!(r54.starts_with("HTTP/1.1 404 Not Found"));
     assert!(r54.contains("receipt_not_found"));
+
+    // (az) POST /v1/workflow/receipts/prune prunes workflow receipts retaining keep_latest
+    let body_prune = serde_json::json!({ "keep_latest": 10 }).to_string();
+    let r55 = send_http(&format!(
+        "POST /v1/workflow/receipts/prune HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_prune}",
+        body_prune.len()
+    ));
+    assert!(r55.starts_with("HTTP/1.1 200 OK"));
+    assert!(r55.contains("\"deleted\":"));
+    assert!(r55.contains("\"retained\":10"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());

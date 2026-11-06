@@ -417,12 +417,15 @@ enum Commands {
         /// Optional path to a WorkflowJobConfig JSON file
         #[arg(long)]
         config: Option<PathBuf>,
-        /// Run built-in 4-step pipeline verification demo
+        /// Run built-in 5-step pipeline verification demo
         #[arg(long)]
         demo: bool,
         /// List previously recorded workflow execution receipts
         #[arg(long)]
         list_receipts: bool,
+        /// Prune older workflow execution receipts keeping at most N latest
+        #[arg(long)]
+        prune_keep: Option<usize>,
     },
 }
 
@@ -1406,7 +1409,17 @@ fn main() {
             config,
             demo,
             list_receipts,
+            prune_keep,
         } => {
+            if let Some(keep) = prune_keep {
+                let deleted = app.store.prune_workflow_receipts(keep)?;
+                println!(
+                    "Pruned {} workflow execution receipts (retained latest {}).",
+                    deleted, keep
+                );
+                return Ok(());
+            }
+
             if list_receipts {
                 let receipts = app.store.list_workflow_receipts(Some(20))?;
                 if receipts.is_empty() {
@@ -1438,6 +1451,9 @@ fn main() {
                     workflow_id: format!("wf-demo-{}", now_epoch_ms()),
                     title: "Lora Agent Built-in Demo Pipeline".to_string(),
                     steps: vec![
+                        WorkflowStepKind::DoctorProbe {
+                            min_available_ram_mb: Some(512),
+                        },
                         WorkflowStepKind::IndexWorkspace {
                             workspace_id: "ws-demo".to_string(),
                             relative_path: "docs/ARCHITECTURE.md".to_string(),
