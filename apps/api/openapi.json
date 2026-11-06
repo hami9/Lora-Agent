@@ -406,7 +406,7 @@
         "summary": "Execute multi-phase workflow pipeline covering indexing, grounded reasoning, patch preview, and audit export",
         "responses": {
           "200": {
-            "description": "WorkflowExecutionReceipt detailing step outcomes and pipeline status"
+            "description": "WorkflowExecutionReceipt detailing step outcomes, execution latency telemetry (started_at_ms, duration_ms, total_duration_ms), and pipeline status"
           },
           "400": {
             "description": "Malformed workflow specification or policy denial"
@@ -432,7 +432,7 @@
         "summary": "List persistent workflow execution receipts",
         "responses": {
           "200": {
-            "description": "Array of persistent workflow execution receipts"
+            "description": "Array of persistent workflow execution receipts with stage duration telemetry"
           }
         }
       }

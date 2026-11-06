@@ -1433,12 +1433,13 @@ fn main() {
                     println!("=== Recorded Workflow Receipts ({}) ===", receipts.len());
                     for (i, r) in receipts.iter().enumerate() {
                         println!(
-                            "[{}] ID: {} | Steps: {}/{} | Success: {} | Time: {}",
+                            "[{}] ID: {} | Steps: {}/{} | Success: {} | Duration: {}ms | Time: {}",
                             i + 1,
                             r.workflow_id,
                             r.completed_steps,
                             r.total_steps,
                             r.successful,
+                            r.total_duration_ms,
                             r.created_at_ms
                         );
                     }
@@ -1516,13 +1517,15 @@ fn main() {
             println!("Total Steps     : {}", receipt.total_steps);
             println!("Completed Steps : {}", receipt.completed_steps);
             println!("Successful      : {}", receipt.successful);
+            println!("Total Duration  : {}ms", receipt.total_duration_ms);
             println!("Step Outcomes   :");
             for outcome in &receipt.step_outcomes {
                 println!(
-                    "  [{}] {} -> success: {} ({})",
+                    "  [{}] {} -> success: {} (took {}ms) ({})",
                     outcome.step_index + 1,
                     outcome.step_kind,
                     outcome.success,
+                    outcome.duration_ms,
                     outcome.detail
                 );
             }

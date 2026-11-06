@@ -909,6 +909,10 @@ pub struct WorkflowStepOutcome {
     pub step_kind: String,
     pub success: bool,
     pub detail: String,
+    #[serde(default)]
+    pub started_at_ms: u64,
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -919,6 +923,8 @@ pub struct WorkflowExecutionReceipt {
     pub successful: bool,
     pub step_outcomes: Vec<WorkflowStepOutcome>,
     pub created_at_ms: u64,
+    #[serde(default)]
+    pub total_duration_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1102,10 +1108,12 @@ pub fn execute_workflow_job(
         ));
     }
 
+    let job_start = crate::store::now_epoch_ms();
     let mut outcomes = Vec::new();
     let mut all_success = true;
 
     for (idx, step) in config.steps.iter().enumerate() {
+        let step_start = crate::store::now_epoch_ms();
         let (kind_name, success, detail) = match step {
             WorkflowStepKind::DoctorProbe {
                 min_available_ram_mb,
@@ -1204,6 +1212,8 @@ pub fn execute_workflow_job(
             }
         };
 
+        let step_duration = crate::store::now_epoch_ms().saturating_sub(step_start);
+
         if !success {
             all_success = false;
         }
@@ -1213,6 +1223,8 @@ pub fn execute_workflow_job(
             step_kind: kind_name,
             success,
             detail,
+            started_at_ms: step_start,
+            duration_ms: step_duration,
         });
 
         if !success && config.stop_on_failure {
@@ -1220,12 +1232,15 @@ pub fn execute_workflow_job(
         }
     }
 
+    let total_duration_ms = crate::store::now_epoch_ms().saturating_sub(job_start);
+
     Ok(WorkflowExecutionReceipt {
         workflow_id: config.workflow_id.clone(),
         total_steps: config.steps.len(),
         completed_steps: outcomes.len(),
         successful: all_success,
         step_outcomes: outcomes,
-        created_at_ms: crate::store::now_epoch_ms(),
+        created_at_ms: job_start,
+        total_duration_ms,
     })
 }

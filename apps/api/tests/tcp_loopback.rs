@@ -888,6 +888,8 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r49.contains("\"total_steps\":4"));
     assert!(r49.contains("\"completed_steps\":4"));
     assert!(r49.contains("\"successful\":true"));
+    assert!(r49.contains("\"total_duration_ms\":"));
+    assert!(r49.contains("\"duration_ms\":"));
 
     // (au) POST /v1/workflow/run rejects empty steps list
     let body_wf_bad = serde_json::json!({
@@ -921,6 +923,7 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r52.starts_with("HTTP/1.1 200 OK"));
     assert!(r52.contains("\"count\":"));
     assert!(r52.contains("\"workflow_id\":\"wf-test-01\""));
+    assert!(r52.contains("\"total_duration_ms\":"));
 
     // (ax) GET /v1/workflow/receipts/{id} returns specific persisted receipt
     let r53 = send_http(&format!(
@@ -930,6 +933,7 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r53.contains("\"found\":true"));
     assert!(r53.contains("\"total_steps\":4"));
     assert!(r53.contains("\"workflow_id\":\"wf-test-01\""));
+    assert!(r53.contains("\"total_duration_ms\":"));
 
     // (ay) GET /v1/workflow/receipts/{id} returns 404 for non-existent receipt
     let r54 = send_http(&format!(

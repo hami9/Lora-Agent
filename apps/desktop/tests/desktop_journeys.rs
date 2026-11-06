@@ -64,6 +64,7 @@ fn desktop_shell_view_model_csp_and_capabilities_e2e() {
     assert!(html.contains("broker-status-card"));
     assert!(html.contains("doctor-live"));
     assert!(html.contains("workflow-live"));
+    assert!(html.contains("wf-latest-duration"));
 
     // 4. Verify Tauri v2 capability manifest disallows remote URLs and shell/fs ambient plugins
     let cap_raw = include_str!("../capabilities/main-window.json");

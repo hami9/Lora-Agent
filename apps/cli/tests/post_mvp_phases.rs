@@ -2134,12 +2134,36 @@ fn workflow_pipeline_execution_and_step_accounting() {
     assert_eq!(receipt.total_steps, 5);
     assert_eq!(receipt.completed_steps, 5);
     assert!(receipt.successful);
+    assert!(receipt.created_at_ms > 0);
     assert_eq!(receipt.step_outcomes.len(), 5);
     assert!(receipt.step_outcomes[0].success);
+    assert!(receipt.step_outcomes[0].started_at_ms > 0);
     assert!(receipt.step_outcomes[1].success);
     assert!(receipt.step_outcomes[2].success);
     assert!(receipt.step_outcomes[3].success);
     assert!(receipt.step_outcomes[4].success);
+
+    // Verify backward compatibility with older receipts lacking telemetry fields
+    let legacy_json = r#"{
+        "workflow_id": "wf-legacy",
+        "total_steps": 1,
+        "completed_steps": 1,
+        "successful": true,
+        "step_outcomes": [
+            {
+                "step_index": 0,
+                "step_kind": "doctor_probe",
+                "success": true,
+                "detail": "legacy probe"
+            }
+        ],
+        "created_at_ms": 1700000000000
+    }"#;
+    let parsed_legacy: lora_core::WorkflowExecutionReceipt =
+        serde_json::from_str(legacy_json).expect("deserialize legacy receipt");
+    assert_eq!(parsed_legacy.total_duration_ms, 0);
+    assert_eq!(parsed_legacy.step_outcomes[0].started_at_ms, 0);
+    assert_eq!(parsed_legacy.step_outcomes[0].duration_ms, 0);
 
     // Verify persistent storage and retrieval in SqliteStore
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -2182,6 +2206,8 @@ fn workflow_pipeline_execution_and_step_accounting() {
     let stdout_demo = String::from_utf8_lossy(&out_demo.stdout);
     assert!(stdout_demo.contains("Workflow Execution Receipt"));
     assert!(stdout_demo.contains("Successful      : true"));
+    assert!(stdout_demo.contains("Total Duration  :"));
+    assert!(stdout_demo.contains("(took "));
 
     let out_list = std::process::Command::new(lora_bin)
         .args([
@@ -2195,6 +2221,7 @@ fn workflow_pipeline_execution_and_step_accounting() {
     assert!(out_list.status.success());
     let stdout_list = String::from_utf8_lossy(&out_list.stdout);
     assert!(stdout_list.contains("Recorded Workflow Receipts"));
+    assert!(stdout_list.contains("Duration:"));
 
     // Verify CLI workflow --prune-keep
     let out_prune = std::process::Command::new(lora_bin)
