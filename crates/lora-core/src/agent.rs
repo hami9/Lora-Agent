@@ -903,6 +903,12 @@ pub struct WorkflowJobConfig {
     pub stop_on_failure: bool,
     #[serde(default)]
     pub max_duration_ms: Option<u64>,
+    #[serde(default)]
+    pub max_step_retries: Option<u32>,
+}
+
+fn default_step_attempts() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -915,6 +921,8 @@ pub struct WorkflowStepOutcome {
     pub started_at_ms: u64,
     #[serde(default)]
     pub duration_ms: u64,
+    #[serde(default = "default_step_attempts")]
+    pub attempts: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -961,6 +969,11 @@ pub fn validate_workflow_job(config: &WorkflowJobConfig) -> WorkflowValidationRe
     }
     if let Some(0) = config.max_duration_ms {
         issues.push("max_duration_ms must be positive when specified".to_string());
+    }
+    if let Some(retries) = config.max_step_retries {
+        if retries > 10 {
+            issues.push("max_step_retries must not exceed 10".to_string());
+        }
     }
 
     for (idx, step) in config.steps.iter().enumerate() {
@@ -1064,7 +1077,10 @@ pub fn validate_workflow_job(config: &WorkflowJobConfig) -> WorkflowValidationRe
             WorkflowStepKind::AuditExport { output_path } => {
                 if output_path.trim().is_empty() {
                     ("audit_export", false, "empty output_path".to_string())
-                } else if output_path.contains("..") {
+                } else if output_path.contains("..")
+                    || output_path.starts_with('/')
+                    || output_path.starts_with('\\')
+                {
                     (
                         "audit_export",
                         false,
@@ -1119,6 +1135,13 @@ pub fn execute_workflow_job(
             "workflow max_duration_ms must be positive when specified".to_string(),
         ));
     }
+    if let Some(retries) = config.max_step_retries {
+        if retries > 10 {
+            return Err(LoraError::PolicyDenied(
+                "workflow max_step_retries must not exceed 10".to_string(),
+            ));
+        }
+    }
 
     let job_start = crate::store::now_epoch_ms();
     let mut outcomes = Vec::new();
@@ -1143,126 +1166,182 @@ pub fn execute_workflow_job(
                     ),
                     started_at_ms: crate::store::now_epoch_ms(),
                     duration_ms: 0,
+                    attempts: 1,
                 });
                 break;
             }
         }
 
         let step_start = crate::store::now_epoch_ms();
-        let (kind_name, success, detail) = match step {
-            WorkflowStepKind::DoctorProbe {
-                min_available_ram_mb,
-            } => {
-                let required_mb = min_available_ram_mb.unwrap_or(512);
-                if required_mb == 0 {
-                    (
-                        "doctor_probe".to_string(),
-                        false,
-                        "invalid zero memory requirement".to_string(),
-                    )
-                } else {
-                    (
-                        "doctor_probe".to_string(),
-                        true,
-                        format!(
-                            "pre-flight hardware health probe satisfied (minimum {required_mb} MB available RAM)"
-                        ),
-                    )
+        let retries_allowed = config.max_step_retries.unwrap_or(0);
+        let mut attempts = 0u32;
+        let mut final_kind = String::new();
+        let mut final_success = false;
+        let mut final_detail = String::new();
+
+        while attempts <= retries_allowed {
+            attempts += 1;
+            let (kind_name, success, detail) = match step {
+                WorkflowStepKind::DoctorProbe {
+                    min_available_ram_mb,
+                } => {
+                    let required_mb = min_available_ram_mb.unwrap_or(512);
+                    if required_mb == 0 {
+                        (
+                            "doctor_probe".to_string(),
+                            false,
+                            "invalid zero memory requirement".to_string(),
+                        )
+                    } else {
+                        (
+                            "doctor_probe".to_string(),
+                            true,
+                            format!(
+                                "pre-flight hardware health probe satisfied (minimum {required_mb} MB available RAM)"
+                            ),
+                        )
+                    }
+                }
+                WorkflowStepKind::IndexWorkspace {
+                    workspace_id,
+                    relative_path,
+                } => {
+                    if workspace_id.trim().is_empty() || relative_path.trim().is_empty() {
+                        (
+                            "index_workspace".to_string(),
+                            false,
+                            "invalid empty workspace or path".to_string(),
+                        )
+                    } else if relative_path.contains("..")
+                        || relative_path.starts_with('/')
+                        || relative_path.starts_with('\\')
+                    {
+                        (
+                            "index_workspace".to_string(),
+                            false,
+                            "scope escape in relative_path".to_string(),
+                        )
+                    } else {
+                        (
+                            "index_workspace".to_string(),
+                            true,
+                            format!("indexed {relative_path} in workspace {workspace_id}"),
+                        )
+                    }
+                }
+                WorkflowStepKind::GroundedQuery {
+                    query,
+                    model,
+                    context_tokens,
+                } => {
+                    if query.trim().is_empty() {
+                        (
+                            "grounded_query".to_string(),
+                            false,
+                            "empty query string".to_string(),
+                        )
+                    } else {
+                        (
+                            "grounded_query".to_string(),
+                            true,
+                            format!(
+                                "executed query with model {model} (budget {context_tokens} tokens)"
+                            ),
+                        )
+                    }
+                }
+                WorkflowStepKind::PreviewPatch {
+                    target_file,
+                    replacement: _,
+                } => {
+                    if target_file.contains("..")
+                        || target_file.starts_with('/')
+                        || target_file.starts_with('\\')
+                    {
+                        (
+                            "preview_patch".to_string(),
+                            false,
+                            "scope escape in target_file path".to_string(),
+                        )
+                    } else {
+                        (
+                            "preview_patch".to_string(),
+                            true,
+                            format!("computed preview for {target_file}"),
+                        )
+                    }
+                }
+                WorkflowStepKind::AuditExport { output_path } => {
+                    if output_path.trim().is_empty() {
+                        (
+                            "audit_export".to_string(),
+                            false,
+                            "empty output_path".to_string(),
+                        )
+                    } else if output_path.contains("..")
+                        || output_path.starts_with('/')
+                        || output_path.starts_with('\\')
+                    {
+                        (
+                            "audit_export".to_string(),
+                            false,
+                            "scope escape in output_path".to_string(),
+                        )
+                    } else {
+                        (
+                            "audit_export".to_string(),
+                            true,
+                            format!("prepared audit export to {output_path}"),
+                        )
+                    }
+                }
+            };
+
+            final_kind = kind_name;
+            final_success = success;
+            final_detail = detail;
+
+            if success {
+                break;
+            }
+
+            if attempts <= retries_allowed {
+                if let Some(max_ms) = config.max_duration_ms {
+                    let elapsed = crate::store::now_epoch_ms().saturating_sub(job_start);
+                    if elapsed >= max_ms {
+                        break;
+                    }
                 }
             }
-            WorkflowStepKind::IndexWorkspace {
-                workspace_id,
-                relative_path,
-            } => {
-                if workspace_id.trim().is_empty() || relative_path.trim().is_empty() {
-                    (
-                        "index_workspace".to_string(),
-                        false,
-                        "invalid empty workspace or path".to_string(),
-                    )
-                } else {
-                    (
-                        "index_workspace".to_string(),
-                        true,
-                        format!("indexed {relative_path} in workspace {workspace_id}"),
-                    )
-                }
-            }
-            WorkflowStepKind::GroundedQuery {
-                query,
-                model,
-                context_tokens,
-            } => {
-                if query.trim().is_empty() {
-                    (
-                        "grounded_query".to_string(),
-                        false,
-                        "empty query string".to_string(),
-                    )
-                } else {
-                    (
-                        "grounded_query".to_string(),
-                        true,
-                        format!(
-                            "executed query with model {model} (budget {context_tokens} tokens)"
-                        ),
-                    )
-                }
-            }
-            WorkflowStepKind::PreviewPatch {
-                target_file,
-                replacement: _,
-            } => {
-                if target_file.contains("..")
-                    || target_file.starts_with('/')
-                    || target_file.starts_with('\\')
-                {
-                    (
-                        "preview_patch".to_string(),
-                        false,
-                        "scope escape in target_file path".to_string(),
-                    )
-                } else {
-                    (
-                        "preview_patch".to_string(),
-                        true,
-                        format!("computed preview for {target_file}"),
-                    )
-                }
-            }
-            WorkflowStepKind::AuditExport { output_path } => {
-                if output_path.trim().is_empty() {
-                    (
-                        "audit_export".to_string(),
-                        false,
-                        "empty output_path".to_string(),
-                    )
-                } else {
-                    (
-                        "audit_export".to_string(),
-                        true,
-                        format!("prepared audit export to {output_path}"),
-                    )
-                }
-            }
-        };
+        }
 
         let step_duration = crate::store::now_epoch_ms().saturating_sub(step_start);
 
-        if !success {
+        if !final_success {
             all_success = false;
         }
 
+        let annotated_detail = if attempts > 1 {
+            if final_success {
+                format!("{final_detail} (succeeded on attempt {attempts})")
+            } else {
+                format!("{final_detail} (failed after {attempts} attempts)")
+            }
+        } else {
+            final_detail
+        };
+
         outcomes.push(WorkflowStepOutcome {
             step_index: idx,
-            step_kind: kind_name,
-            success,
-            detail,
+            step_kind: final_kind,
+            success: final_success,
+            detail: annotated_detail,
             started_at_ms: step_start,
             duration_ms: step_duration,
+            attempts,
         });
 
-        if !success && config.stop_on_failure {
+        if !final_success && config.stop_on_failure {
             break;
         }
 
@@ -1284,6 +1363,7 @@ pub fn execute_workflow_job(
                         ),
                         started_at_ms: crate::store::now_epoch_ms(),
                         duration_ms: 0,
+                        attempts: 1,
                     });
                     break;
                 }

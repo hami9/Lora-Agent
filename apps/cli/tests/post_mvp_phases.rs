@@ -2129,6 +2129,7 @@ fn workflow_pipeline_execution_and_step_accounting() {
         ],
         stop_on_failure: true,
         max_duration_ms: None,
+        max_step_retries: None,
     };
 
     let receipt = execute_workflow_job(&cfg).expect("execute workflow");
@@ -2138,6 +2139,7 @@ fn workflow_pipeline_execution_and_step_accounting() {
     assert!(receipt.created_at_ms > 0);
     assert_eq!(receipt.step_outcomes.len(), 5);
     assert!(receipt.step_outcomes[0].success);
+    assert_eq!(receipt.step_outcomes[0].attempts, 1);
     assert!(receipt.step_outcomes[0].started_at_ms > 0);
     assert!(receipt.step_outcomes[1].success);
     assert!(receipt.step_outcomes[2].success);
@@ -2165,6 +2167,7 @@ fn workflow_pipeline_execution_and_step_accounting() {
     assert_eq!(parsed_legacy.total_duration_ms, 0);
     assert_eq!(parsed_legacy.step_outcomes[0].started_at_ms, 0);
     assert_eq!(parsed_legacy.step_outcomes[0].duration_ms, 0);
+    assert_eq!(parsed_legacy.step_outcomes[0].attempts, 1);
 
     // Verify persistent storage and retrieval in SqliteStore
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -2315,4 +2318,51 @@ fn workflow_pipeline_execution_and_step_accounting() {
     assert!(out_demo_dl.status.success());
     let stdout_demo_dl = String::from_utf8_lossy(&out_demo_dl.stdout);
     assert!(stdout_demo_dl.contains("Deadline State  : SATISFIED"));
+
+    // Verify max_step_retries validator and policy enforcement
+    let mut bad_retries_cfg = cfg.clone();
+    bad_retries_cfg.max_step_retries = Some(15);
+    let val_bad_retries = lora_core::validate_workflow_job(&bad_retries_cfg);
+    assert!(!val_bad_retries.valid);
+    assert!(val_bad_retries
+        .issues
+        .iter()
+        .any(|i| i.contains("max_step_retries must not exceed 10")));
+    assert!(execute_workflow_job(&bad_retries_cfg).is_err());
+
+    // Verify retry execution loop and attempts accounting
+    let retry_job = WorkflowJobConfig {
+        workflow_id: "wf-retry-test".to_string(),
+        title: "Retry Test".to_string(),
+        steps: vec![WorkflowStepKind::DoctorProbe {
+            min_available_ram_mb: Some(0), // Fails intentionally
+        }],
+        stop_on_failure: true,
+        max_duration_ms: None,
+        max_step_retries: Some(2),
+    };
+    let retry_receipt = execute_workflow_job(&retry_job).expect("execute retry job");
+    assert!(!retry_receipt.successful);
+    assert_eq!(retry_receipt.step_outcomes.len(), 1);
+    assert_eq!(retry_receipt.step_outcomes[0].attempts, 3);
+    assert!(retry_receipt.step_outcomes[0]
+        .detail
+        .contains("failed after 3 attempts"));
+
+    // Verify CLI workflow --demo --max-step-retries 2
+    let out_demo_retries = std::process::Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "workflow",
+            "--demo",
+            "--max-step-retries",
+            "2",
+        ])
+        .output()
+        .expect("run lora workflow --demo --max-step-retries 2");
+    assert!(out_demo_retries.status.success());
+    let stdout_demo_retries = String::from_utf8_lossy(&out_demo_retries.stdout);
+    assert!(stdout_demo_retries.contains("Workflow Execution Receipt"));
+    assert!(stdout_demo_retries.contains("Successful      : true"));
 }

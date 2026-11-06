@@ -252,7 +252,9 @@ fn route_request(
                     "audit_export"
                 ],
                 "orchestration_mode": "air_gapped_deterministic",
-                "deadline_gating": true
+                "deadline_gating": true,
+                "step_retries_supported": true,
+                "max_step_retries_cap": 10
             });
             HttpResponse::json(&status)
         }
@@ -281,6 +283,7 @@ fn route_request(
                 ],
                 stop_on_failure: true,
                 max_duration_ms: Some(30_000),
+                max_step_retries: Some(2),
             };
             let validation = validate_workflow_job(&demo_cfg);
             HttpResponse::json(&validation)

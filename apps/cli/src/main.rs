@@ -433,6 +433,9 @@ enum Commands {
         /// Optional maximum execution deadline in milliseconds for workflow pipeline
         #[arg(long)]
         max_duration_ms: Option<u64>,
+        /// Optional maximum transient failure retries per step (capped at 10)
+        #[arg(long)]
+        max_step_retries: Option<u32>,
     },
 }
 
@@ -1419,6 +1422,7 @@ fn main() {
             prune_keep,
             validate,
             max_duration_ms,
+            max_step_retries,
         } => {
             if let Some(keep) = prune_keep {
                 let deleted = app.store.prune_workflow_receipts(keep)?;
@@ -1489,11 +1493,15 @@ fn main() {
                     ],
                     stop_on_failure: true,
                     max_duration_ms: None,
+                    max_step_retries: None,
                 },
             };
 
             if let Some(lim) = max_duration_ms {
                 job_config.max_duration_ms = Some(lim);
+            }
+            if let Some(retries) = max_step_retries {
+                job_config.max_step_retries = Some(retries);
             }
 
             if validate {
@@ -1504,6 +1512,9 @@ fn main() {
                 println!("Valid       : {}", report.valid);
                 if let Some(lim) = job_config.max_duration_ms {
                     println!("Deadline Lim: {}ms", lim);
+                }
+                if let Some(retries) = job_config.max_step_retries {
+                    println!("Max Retries : {} per step", retries);
                 }
                 println!("Step Checks :");
                 for check in &report.step_validations {
@@ -1543,8 +1554,13 @@ fn main() {
             }
             println!("Step Outcomes   :");
             for outcome in &receipt.step_outcomes {
+                let retry_tag = if outcome.attempts > 1 {
+                    format!(" [{} attempts]", outcome.attempts)
+                } else {
+                    String::new()
+                };
                 println!(
-                    "  [{}] {} -> success: {} (took {}ms) ({})",
+                    "  [{}] {} -> success: {} (took {}ms){retry_tag} ({})",
                     outcome.step_index + 1,
                     outcome.step_kind,
                     outcome.success,
