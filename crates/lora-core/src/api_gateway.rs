@@ -358,6 +358,7 @@ impl ApiRunManager {
                 "workflow.cancel".to_string(),
                 "workflow.receipts".to_string(),
                 "workflow.receipts.prune".to_string(),
+                "workflow.validate".to_string(),
             ],
             max_request_bytes: 1024 * 1024,
             sse_replay_window_events: self.max_replay_events,

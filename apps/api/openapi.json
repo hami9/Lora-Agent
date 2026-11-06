@@ -462,6 +462,19 @@
           }
         }
       }
+    },
+    "/v1/workflow/validate": {
+      "post": {
+        "summary": "Validate multi-step workflow pipeline configuration and step parameters without execution",
+        "responses": {
+          "200": {
+            "description": "WorkflowValidationReceipt detailing structural validity and any detected issues"
+          },
+          "400": {
+            "description": "Malformed workflow specification"
+          }
+        }
+      }
     }
   }
 }

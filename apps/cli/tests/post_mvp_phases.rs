@@ -2211,4 +2211,36 @@ fn workflow_pipeline_execution_and_step_accounting() {
     let stdout_prune = String::from_utf8_lossy(&out_prune.stdout);
     assert!(stdout_prune.contains("Pruned"));
     assert!(stdout_prune.contains("retained latest 1"));
+
+    // Verify validate_workflow_job
+    let val_ok = lora_core::validate_workflow_job(&cfg);
+    assert!(val_ok.valid);
+    assert_eq!(val_ok.total_steps, 5);
+    assert!(val_ok.issues.is_empty());
+
+    let mut bad_cfg = cfg.clone();
+    bad_cfg.workflow_id = "".to_string();
+    bad_cfg.steps.push(WorkflowStepKind::PreviewPatch {
+        target_file: "../escaped.txt".to_string(),
+        replacement: "bad".to_string(),
+    });
+    let val_bad = lora_core::validate_workflow_job(&bad_cfg);
+    assert!(!val_bad.valid);
+    assert!(!val_bad.issues.is_empty());
+
+    // Verify CLI workflow --demo --validate
+    let out_val = std::process::Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "workflow",
+            "--demo",
+            "--validate",
+        ])
+        .output()
+        .expect("run lora workflow --demo --validate");
+    assert!(out_val.status.success());
+    let stdout_val = String::from_utf8_lossy(&out_val.stdout);
+    assert!(stdout_val.contains("Workflow Validation Receipt"));
+    assert!(stdout_val.contains("Valid       : true"));
 }

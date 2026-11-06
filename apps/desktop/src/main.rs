@@ -5,8 +5,9 @@
 use clap::Parser;
 use lora_core::{
     allocate_context_budget, default_risk_register_matrix, slice_virtualized_transcript,
-    ApprovalDecision, ApprovalPromptPort, ApprovalRequest, ContextBudgetRequest,
-    LoraApplicationService, LoraError, TrustedConsentDialogViewModel, DEFAULT_SAFETY_RESERVE_BYTES,
+    validate_workflow_job, ApprovalDecision, ApprovalPromptPort, ApprovalRequest,
+    ContextBudgetRequest, LoraApplicationService, LoraError, TrustedConsentDialogViewModel,
+    WorkflowJobConfig, WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -264,6 +265,24 @@ fn route_request(
                 &format!("{:?}", e.reason_code()),
             ),
         },
+        "/api/workflow-validate" => {
+            let demo_cfg = WorkflowJobConfig {
+                workflow_id: "desktop-wf-probe".to_string(),
+                title: "Desktop Live Probe".to_string(),
+                steps: vec![
+                    WorkflowStepKind::DoctorProbe {
+                        min_available_ram_mb: Some(512),
+                    },
+                    WorkflowStepKind::IndexWorkspace {
+                        workspace_id: "default".to_string(),
+                        relative_path: "docs/ARCHITECTURE.md".to_string(),
+                    },
+                ],
+                stop_on_failure: true,
+            };
+            let validation = validate_workflow_job(&demo_cfg);
+            HttpResponse::json(&validation)
+        }
         "/api/hardware" => match app.hw_probe.capture_snapshot(data_dir) {
             Ok(snap) => HttpResponse::json(&snap),
             Err(e) => HttpResponse::error(

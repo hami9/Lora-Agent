@@ -9,8 +9,8 @@ use lora_core::{
     default_risk_register_matrix, evaluate_adapter_promotion_gate, execute_workflow_job,
     now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
     validate_catalog_variant, validate_loopback_bind, validate_specialist_handoff,
-    verify_egress_permit, verify_loopback_http_security, AgentLimits, ApiRunManager,
-    ApprovalDecision, ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit,
+    validate_workflow_job, verify_egress_permit, verify_loopback_http_security, AgentLimits,
+    ApiRunManager, ApprovalDecision, ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit,
     CatalogVariantDescriptor, CompensatingPatchReceipt, ContextBudgetRequest, EgressConsentPreview,
     EgressPermit, ExecutionMode, ExtensionManifestV1, HeldOutEvaluationReceipt, IdempotencyLedger,
     LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
@@ -1557,6 +1557,50 @@ fn handle_http_connection(
                     write_http_response(stream, "400 Bad Request", "application/json", &err)
                 }
             }
+        }
+        ("POST", "/v1/workflow/validate") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+
+            let config: WorkflowJobConfig =
+                match serde_json::from_value(if req_json.get("workflow").is_some() {
+                    req_json["workflow"].clone()
+                } else {
+                    req_json.clone()
+                }) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let err = serde_json::json!({
+                            "code": "malformed_request",
+                            "detail": format!("invalid workflow configuration: {e}"),
+                        })
+                        .to_string();
+                        return write_http_response(
+                            stream,
+                            "400 Bad Request",
+                            "application/json",
+                            &err,
+                        );
+                    }
+                };
+
+            let report = validate_workflow_job(&config);
+            let body = serde_json::to_string(&report).unwrap_or_default();
+            write_http_response(stream, "200 OK", "application/json", &body)
         }
         ("POST", p) if p.starts_with("/v1/workflow/") && p.ends_with("/cancel") => {
             let id = &p["/v1/workflow/".len()..p.len() - "/cancel".len()];

@@ -153,7 +153,7 @@ fn desktop_loopback_bridge_serves_ui_and_view_models() {
             "--serve",
             "127.0.0.1:0",
             "--max-requests",
-            "16",
+            "17",
         ])
         .stdout(Stdio::piped())
         .spawn()
@@ -261,14 +261,20 @@ fn desktop_loopback_bridge_serves_ui_and_view_models() {
     assert!(body.contains("\"count\":"));
     assert!(body.contains("\"receipts\":"));
 
-    // 15. DNS-rebinding defense: foreign Host header is rejected
+    // 15. Workflow dry-run validation endpoint
+    let (head, body) = get("/api/workflow-validate");
+    assert!(head.starts_with("HTTP/1.1 200"));
+    assert!(body.contains("\"valid\": true"));
+    assert!(body.contains("doctor_probe"));
+
+    // 16. DNS-rebinding defense: foreign Host header is rejected
     let (head, _) = http_request(
         &addr,
         "GET /api/dashboard HTTP/1.1\r\nHost: evil.example:80\r\nConnection: close\r\n\r\n",
     );
     assert!(head.starts_with("HTTP/1.1 403"));
 
-    // 16. Read-only bridge: non-GET methods are rejected
+    // 17. Read-only bridge: non-GET methods are rejected
     let (head, _) = http_request(
         &addr,
         &format!("POST /api/dashboard HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\n\r\n"),

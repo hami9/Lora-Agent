@@ -921,6 +921,173 @@ pub struct WorkflowExecutionReceipt {
     pub created_at_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowStepValidation {
+    pub step_index: usize,
+    pub step_kind: String,
+    pub valid: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowValidationReceipt {
+    pub valid: bool,
+    pub workflow_id: String,
+    pub total_steps: usize,
+    pub step_validations: Vec<WorkflowStepValidation>,
+    pub issues: Vec<String>,
+}
+
+/// Perform structural and parameter bounds validation of a workflow configuration without execution (`docs/AGENT_RUNTIME.md`).
+pub fn validate_workflow_job(config: &WorkflowJobConfig) -> WorkflowValidationReceipt {
+    let mut issues = Vec::new();
+    let mut step_validations = Vec::new();
+
+    if config.workflow_id.trim().is_empty() {
+        issues.push("workflow requires a non-empty workflow_id".to_string());
+    }
+    if config.steps.is_empty() {
+        issues.push("workflow requires at least one step".to_string());
+    }
+
+    for (idx, step) in config.steps.iter().enumerate() {
+        let (kind, valid, msg) = match step {
+            WorkflowStepKind::DoctorProbe {
+                min_available_ram_mb,
+            } => {
+                if let Some(0) = min_available_ram_mb {
+                    (
+                        "doctor_probe",
+                        false,
+                        "invalid zero memory requirement".to_string(),
+                    )
+                } else {
+                    (
+                        "doctor_probe",
+                        true,
+                        "valid pre-flight hardware probe specification".to_string(),
+                    )
+                }
+            }
+            WorkflowStepKind::IndexWorkspace {
+                workspace_id,
+                relative_path,
+            } => {
+                if workspace_id.trim().is_empty() || relative_path.trim().is_empty() {
+                    (
+                        "index_workspace",
+                        false,
+                        "invalid empty workspace_id or relative_path".to_string(),
+                    )
+                } else if relative_path.contains("..")
+                    || relative_path.starts_with('/')
+                    || relative_path.starts_with('\\')
+                {
+                    (
+                        "index_workspace",
+                        false,
+                        "scope escape in relative_path".to_string(),
+                    )
+                } else {
+                    (
+                        "index_workspace",
+                        true,
+                        format!("valid target path {relative_path} in workspace {workspace_id}"),
+                    )
+                }
+            }
+            WorkflowStepKind::GroundedQuery {
+                query,
+                model,
+                context_tokens,
+            } => {
+                if query.trim().is_empty() {
+                    ("grounded_query", false, "empty query string".to_string())
+                } else if model.trim().is_empty() {
+                    (
+                        "grounded_query",
+                        false,
+                        "empty model identifier".to_string(),
+                    )
+                } else if *context_tokens == 0 {
+                    (
+                        "grounded_query",
+                        false,
+                        "context_tokens must be positive".to_string(),
+                    )
+                } else {
+                    (
+                        "grounded_query",
+                        true,
+                        format!(
+                            "valid query with model {model} (context budget: {context_tokens} tokens)"
+                        ),
+                    )
+                }
+            }
+            WorkflowStepKind::PreviewPatch {
+                target_file,
+                replacement: _,
+            } => {
+                if target_file.trim().is_empty() {
+                    ("preview_patch", false, "empty target_file path".to_string())
+                } else if target_file.contains("..")
+                    || target_file.starts_with('/')
+                    || target_file.starts_with('\\')
+                {
+                    (
+                        "preview_patch",
+                        false,
+                        "scope escape in target_file path".to_string(),
+                    )
+                } else {
+                    (
+                        "preview_patch",
+                        true,
+                        format!("valid patch target {target_file}"),
+                    )
+                }
+            }
+            WorkflowStepKind::AuditExport { output_path } => {
+                if output_path.trim().is_empty() {
+                    ("audit_export", false, "empty output_path".to_string())
+                } else if output_path.contains("..") {
+                    (
+                        "audit_export",
+                        false,
+                        "scope escape in output_path".to_string(),
+                    )
+                } else {
+                    (
+                        "audit_export",
+                        true,
+                        format!("valid audit export target {output_path}"),
+                    )
+                }
+            }
+        };
+
+        if !valid {
+            issues.push(format!("Step {}: {msg}", idx + 1));
+        }
+
+        step_validations.push(WorkflowStepValidation {
+            step_index: idx,
+            step_kind: kind.to_string(),
+            valid,
+            message: msg,
+        });
+    }
+
+    WorkflowValidationReceipt {
+        valid: issues.is_empty(),
+        workflow_id: config.workflow_id.clone(),
+        total_steps: config.steps.len(),
+        step_validations,
+        issues,
+    }
+}
+
 pub fn execute_workflow_job(
     config: &WorkflowJobConfig,
 ) -> Result<WorkflowExecutionReceipt, LoraError> {

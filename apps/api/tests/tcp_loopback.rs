@@ -146,7 +146,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "55",
+            "56",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -947,6 +947,15 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r55.starts_with("HTTP/1.1 200 OK"));
     assert!(r55.contains("\"deleted\":"));
     assert!(r55.contains("\"retained\":10"));
+
+    // (ba) POST /v1/workflow/validate dry-run checks pipeline parameters
+    let r56 = send_http(&format!(
+        "POST /v1/workflow/validate HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_wf_ok}",
+        body_wf_ok.len()
+    ));
+    assert!(r56.starts_with("HTTP/1.1 200 OK"));
+    assert!(r56.contains("\"valid\":true"));
+    assert!(r56.contains("\"total_steps\":4"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());
