@@ -1,6 +1,7 @@
 //! Single-writer SQLite persistence, schema migrations, backups, audit journal,
 //! and startup crash reconciliation (`docs/ARCHITECTURE.md`, `ADR-0005`, `M7`).
 
+use crate::agent::WorkflowExecutionReceipt;
 use crate::error::{redact_sensitive_text, LoraError};
 use rusqlite::{backup::Backup, params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -237,6 +238,18 @@ impl SqliteStore {
                 summary TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS workflow_receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workflow_id TEXT NOT NULL,
+                total_steps INTEGER NOT NULL,
+                completed_steps INTEGER NOT NULL,
+                successful INTEGER NOT NULL,
+                receipt_json TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_workflow_receipts_wid ON workflow_receipts(workflow_id);
+
             PRAGMA user_version = 1;
             COMMIT;",
         )?;
@@ -762,6 +775,81 @@ impl SqliteStore {
         let raw_json = serde_json::to_string_pretty(&events)
             .map_err(|e| LoraError::Database(e.to_string()))?;
         Ok(redact_sensitive_text(&raw_json))
+    }
+
+    /// Persist a workflow execution receipt (`M7`, `docs/ARCHITECTURE.md`).
+    pub fn record_workflow_receipt(
+        &self,
+        receipt: &WorkflowExecutionReceipt,
+    ) -> Result<i64, LoraError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let receipt_json =
+            serde_json::to_string(receipt).map_err(|e| LoraError::Database(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO workflow_receipts (workflow_id, total_steps, completed_steps, successful, receipt_json, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                receipt.workflow_id,
+                receipt.total_steps as i64,
+                receipt.completed_steps as i64,
+                if receipt.successful { 1i64 } else { 0i64 },
+                receipt_json,
+                receipt.created_at_ms as i64,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// List recent workflow execution receipts ordered by recency (`M7`, `docs/ARCHITECTURE.md`).
+    pub fn list_workflow_receipts(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<WorkflowExecutionReceipt>, LoraError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let lim = limit.unwrap_or(50) as i64;
+        let mut stmt =
+            conn.prepare("SELECT receipt_json FROM workflow_receipts ORDER BY id DESC LIMIT ?1")?;
+        let mut receipts = Vec::new();
+        let rows = stmt.query_map(params![lim], |row| row.get::<_, String>(0))?;
+        for r in rows {
+            let json_str = r?;
+            if let Ok(rcpt) = serde_json::from_str::<WorkflowExecutionReceipt>(&json_str) {
+                receipts.push(rcpt);
+            }
+        }
+        Ok(receipts)
+    }
+
+    /// Find the most recent workflow execution receipt by workflow ID (`M7`, `docs/ARCHITECTURE.md`).
+    pub fn find_workflow_receipt(
+        &self,
+        workflow_id: &str,
+    ) -> Result<Option<WorkflowExecutionReceipt>, LoraError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT receipt_json FROM workflow_receipts WHERE workflow_id = ?1 ORDER BY id DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![workflow_id], |row| row.get::<_, String>(0))?;
+        if let Some(r) = rows.next() {
+            let json_str = r?;
+            let rcpt = serde_json::from_str::<WorkflowExecutionReceipt>(&json_str)
+                .map_err(|e| LoraError::Database(e.to_string()))?;
+            Ok(Some(rcpt))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Prune older workflow receipts while retaining at most `keep_latest` entries.
+    pub fn prune_workflow_receipts(&self, keep_latest: usize) -> Result<usize, LoraError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let deleted = conn.execute(
+            "DELETE FROM workflow_receipts WHERE id NOT IN (
+                SELECT id FROM workflow_receipts ORDER BY id DESC LIMIT ?1
+            )",
+            params![keep_latest as i64],
+        )?;
+        Ok(deleted)
     }
 }
 

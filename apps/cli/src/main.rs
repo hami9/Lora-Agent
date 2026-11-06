@@ -420,6 +420,9 @@ enum Commands {
         /// Run built-in 4-step pipeline verification demo
         #[arg(long)]
         demo: bool,
+        /// List previously recorded workflow execution receipts
+        #[arg(long)]
+        list_receipts: bool,
     },
 }
 
@@ -1399,7 +1402,32 @@ fn main() {
             );
             Ok(())
         }
-        Commands::Workflow { config, demo } => {
+        Commands::Workflow {
+            config,
+            demo,
+            list_receipts,
+        } => {
+            if list_receipts {
+                let receipts = app.store.list_workflow_receipts(Some(20))?;
+                if receipts.is_empty() {
+                    println!("No workflow execution receipts recorded yet.");
+                } else {
+                    println!("=== Recorded Workflow Receipts ({}) ===", receipts.len());
+                    for (i, r) in receipts.iter().enumerate() {
+                        println!(
+                            "[{}] ID: {} | Steps: {}/{} | Success: {} | Time: {}",
+                            i + 1,
+                            r.workflow_id,
+                            r.completed_steps,
+                            r.total_steps,
+                            r.successful,
+                            r.created_at_ms
+                        );
+                    }
+                }
+                return Ok(());
+            }
+
             let job_config = match config {
                 Some(path) if !demo => {
                     let raw = std::fs::read_to_string(&path)?;
@@ -1432,6 +1460,7 @@ fn main() {
             };
 
             let receipt = execute_workflow_job(&job_config)?;
+            let _ = app.store.record_workflow_receipt(&receipt);
             println!("=== Workflow Execution Receipt ===");
             println!("Workflow ID     : {}", receipt.workflow_id);
             println!("Total Steps     : {}", receipt.total_steps);

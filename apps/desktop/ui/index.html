@@ -214,7 +214,7 @@
         </div>
         <div class="card" id="workflow-live" hidden>
           <h2>Workflow Orchestrator Pipeline</h2>
-          <p><strong>Status:</strong> <span id="wf-status">Ready</span> | <strong>Mode:</strong> Air-Gapped Deterministic</p>
+          <p><strong>Status:</strong> <span id="wf-status">Ready</span> | <strong>Mode:</strong> Air-Gapped Deterministic | <strong>Past Receipts:</strong> <span id="wf-receipts-count">0</span></p>
         </div>
       </section>
 
@@ -424,6 +424,11 @@
       if (w && w.status) {
         document.getElementById('wf-status').textContent = w.status;
         document.getElementById('workflow-live').hidden = false;
+      }
+      const rcpts = await getJson('/api/workflow-receipts');
+      if (rcpts && typeof rcpts.count === 'number') {
+        const el = document.getElementById('wf-receipts-count');
+        if (el) el.textContent = rcpts.count;
       }
     };
     if (location.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)) {

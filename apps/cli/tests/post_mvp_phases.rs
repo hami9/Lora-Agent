@@ -2136,4 +2136,59 @@ fn workflow_pipeline_execution_and_step_accounting() {
     assert!(receipt.step_outcomes[1].success);
     assert!(receipt.step_outcomes[2].success);
     assert!(receipt.step_outcomes[3].success);
+
+    // Verify persistent storage and retrieval in SqliteStore
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let store = lora_core::SqliteStore::open(&tmp.path().join("store.db")).expect("open store");
+    let rec_id = store
+        .record_workflow_receipt(&receipt)
+        .expect("record receipt");
+    assert!(rec_id > 0);
+
+    let listed = store
+        .list_workflow_receipts(Some(10))
+        .expect("list receipts");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].workflow_id, "wf-pipeline-01");
+    assert_eq!(listed[0].total_steps, 4);
+
+    let found = store
+        .find_workflow_receipt("wf-pipeline-01")
+        .expect("find receipt");
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().completed_steps, 4);
+
+    let missing = store
+        .find_workflow_receipt("non-existent")
+        .expect("find missing");
+    assert!(missing.is_none());
+
+    // Verify CLI workflow demo recording and list-receipts
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let out_demo = std::process::Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "workflow",
+            "--demo",
+        ])
+        .output()
+        .expect("run lora workflow --demo");
+    assert!(out_demo.status.success());
+    let stdout_demo = String::from_utf8_lossy(&out_demo.stdout);
+    assert!(stdout_demo.contains("Workflow Execution Receipt"));
+    assert!(stdout_demo.contains("Successful      : true"));
+
+    let out_list = std::process::Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "workflow",
+            "--list-receipts",
+        ])
+        .output()
+        .expect("run lora workflow --list-receipts");
+    assert!(out_list.status.success());
+    let stdout_list = String::from_utf8_lossy(&out_list.stdout);
+    assert!(stdout_list.contains("Recorded Workflow Receipts"));
 }

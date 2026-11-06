@@ -1544,6 +1544,7 @@ fn handle_http_connection(
 
             match execute_workflow_job(&config) {
                 Ok(receipt) => {
+                    let _ = app.store.record_workflow_receipt(&receipt);
                     let body = serde_json::to_string(&receipt).unwrap_or_default();
                     write_http_response(stream, "200 OK", "application/json", &body)
                 }
@@ -1574,6 +1575,71 @@ fn handle_http_connection(
             })
             .to_string();
             write_http_response(stream, "200 OK", "application/json", &body)
+        }
+        ("GET", "/v1/workflow/receipts") => match app.store.list_workflow_receipts(Some(50)) {
+            Ok(receipts) => {
+                let body = serde_json::json!({
+                    "count": receipts.len(),
+                    "receipts": receipts
+                })
+                .to_string();
+                write_http_response(stream, "200 OK", "application/json", &body)
+            }
+            Err(e) => {
+                let err = serde_json::json!({
+                    "code": e.reason_code(),
+                    "detail": e.redacted_message(),
+                })
+                .to_string();
+                write_http_response(
+                    stream,
+                    "500 Internal Server Error",
+                    "application/json",
+                    &err,
+                )
+            }
+        },
+        ("GET", p) if p.starts_with("/v1/workflow/receipts/") => {
+            let id = &p["/v1/workflow/receipts/".len()..];
+            if id.trim().is_empty() {
+                let err = serde_json::json!({
+                    "code": "missing_parameter",
+                    "detail": "empty workflow id",
+                })
+                .to_string();
+                return write_http_response(stream, "400 Bad Request", "application/json", &err);
+            }
+            match app.store.find_workflow_receipt(id) {
+                Ok(Some(receipt)) => {
+                    let body = serde_json::json!({
+                        "found": true,
+                        "receipt": receipt
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Ok(None) => {
+                    let err = serde_json::json!({
+                        "code": "receipt_not_found",
+                        "detail": format!("no workflow execution receipt found for id: {id}"),
+                    })
+                    .to_string();
+                    write_http_response(stream, "404 Not Found", "application/json", &err)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    )
+                }
+            }
         }
         ("POST", "/v1/index") => {
             let req_json: serde_json::Value = match serde_json::from_str(&body_str) {

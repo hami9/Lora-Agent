@@ -426,6 +426,29 @@
           }
         }
       }
+    },
+    "/v1/workflow/receipts": {
+      "get": {
+        "summary": "List persistent workflow execution receipts",
+        "responses": {
+          "200": {
+            "description": "Array of persistent workflow execution receipts"
+          }
+        }
+      }
+    },
+    "/v1/workflow/receipts/{id}": {
+      "get": {
+        "summary": "Retrieve a specific persistent workflow execution receipt by workflow id",
+        "responses": {
+          "200": {
+            "description": "Workflow execution receipt matching specified id"
+          },
+          "404": {
+            "description": "Receipt not found"
+          }
+        }
+      }
     }
   }
 }

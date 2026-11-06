@@ -146,7 +146,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "51",
+            "54",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -913,6 +913,30 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r51.starts_with("HTTP/1.1 200 OK"));
     assert!(r51.contains("\"workflow_id\":\"wf-test-01\""));
     assert!(r51.contains("\"status\":\"canceled\""));
+
+    // (aw) GET /v1/workflow/receipts lists persisted workflow execution receipts
+    let r52 = send_http(&format!(
+        "GET /v1/workflow/receipts HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r52.starts_with("HTTP/1.1 200 OK"));
+    assert!(r52.contains("\"count\":"));
+    assert!(r52.contains("\"workflow_id\":\"wf-test-01\""));
+
+    // (ax) GET /v1/workflow/receipts/{id} returns specific persisted receipt
+    let r53 = send_http(&format!(
+        "GET /v1/workflow/receipts/wf-test-01 HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r53.starts_with("HTTP/1.1 200 OK"));
+    assert!(r53.contains("\"found\":true"));
+    assert!(r53.contains("\"total_steps\":4"));
+    assert!(r53.contains("\"workflow_id\":\"wf-test-01\""));
+
+    // (ay) GET /v1/workflow/receipts/{id} returns 404 for non-existent receipt
+    let r54 = send_http(&format!(
+        "GET /v1/workflow/receipts/non-existent-wf-999 HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r54.starts_with("HTTP/1.1 404 Not Found"));
+    assert!(r54.contains("receipt_not_found"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());

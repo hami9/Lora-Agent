@@ -253,6 +253,16 @@ fn route_request(
             });
             HttpResponse::json(&status)
         }
+        "/api/workflow-receipts" => match app.store.list_workflow_receipts(Some(20)) {
+            Ok(receipts) => HttpResponse::json(&serde_json::json!({
+                "count": receipts.len(),
+                "receipts": receipts
+            })),
+            Err(e) => HttpResponse::error(
+                "500 Internal Server Error",
+                &format!("{:?}", e.reason_code()),
+            ),
+        },
         "/api/hardware" => match app.hw_probe.capture_snapshot(data_dir) {
             Ok(snap) => HttpResponse::json(&snap),
             Err(e) => HttpResponse::error(
