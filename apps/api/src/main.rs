@@ -6,8 +6,8 @@
 use clap::Parser;
 use lora_core::{
     allocate_context_budget, apply_approved_patch, classify_artifact_compatibility,
-    default_risk_register_matrix, evaluate_adapter_promotion_gate, now_epoch_ms,
-    prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
+    default_risk_register_matrix, evaluate_adapter_promotion_gate, execute_workflow_job,
+    now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
     validate_catalog_variant, validate_loopback_bind, validate_specialist_handoff,
     verify_egress_permit, verify_loopback_http_security, AgentLimits, ApiRunManager,
     ApprovalDecision, ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit,
@@ -15,7 +15,7 @@ use lora_core::{
     EgressPermit, ExecutionMode, ExtensionManifestV1, HeldOutEvaluationReceipt, IdempotencyLedger,
     LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
     SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
-    DEFAULT_SAFETY_RESERVE_BYTES,
+    WorkflowJobConfig, DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -1490,6 +1490,61 @@ fn handle_http_connection(
                         "admitted": true,
                     })
                     .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("POST", "/v1/workflow/run") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+
+            let config: WorkflowJobConfig =
+                match serde_json::from_value(if req_json.get("workflow").is_some() {
+                    req_json["workflow"].clone()
+                } else {
+                    req_json.clone()
+                }) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let err = serde_json::json!({
+                            "code": "malformed_request",
+                            "detail": format!("invalid workflow configuration: {e}"),
+                        })
+                        .to_string();
+                        return write_http_response(
+                            stream,
+                            "400 Bad Request",
+                            "application/json",
+                            &err,
+                        );
+                    }
+                };
+
+            match execute_workflow_job(&config) {
+                Ok(receipt) => {
+                    let body = serde_json::to_string(&receipt).unwrap_or_default();
                     write_http_response(stream, "200 OK", "application/json", &body)
                 }
                 Err(e) => {

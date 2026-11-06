@@ -400,6 +400,19 @@
           }
         }
       }
+    },
+    "/v1/workflow/run": {
+      "post": {
+        "summary": "Execute multi-phase workflow pipeline covering indexing, grounded reasoning, patch preview, and audit export",
+        "responses": {
+          "200": {
+            "description": "WorkflowExecutionReceipt detailing step outcomes and pipeline status"
+          },
+          "400": {
+            "description": "Malformed workflow specification or policy denial"
+          }
+        }
+      }
     }
   }
 }

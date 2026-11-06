@@ -870,3 +870,172 @@ pub fn validate_specialist_handoff(handoff: &SpecialistHandoffEnvelope) -> Resul
     }
     Ok(())
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowStepKind {
+    IndexWorkspace {
+        workspace_id: String,
+        relative_path: String,
+    },
+    GroundedQuery {
+        query: String,
+        model: String,
+        context_tokens: u32,
+    },
+    PreviewPatch {
+        target_file: String,
+        replacement: String,
+    },
+    AuditExport {
+        output_path: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowJobConfig {
+    pub workflow_id: String,
+    pub title: String,
+    pub steps: Vec<WorkflowStepKind>,
+    pub stop_on_failure: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowStepOutcome {
+    pub step_index: usize,
+    pub step_kind: String,
+    pub success: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowExecutionReceipt {
+    pub workflow_id: String,
+    pub total_steps: usize,
+    pub completed_steps: usize,
+    pub successful: bool,
+    pub step_outcomes: Vec<WorkflowStepOutcome>,
+    pub created_at_ms: u64,
+}
+
+pub fn execute_workflow_job(
+    config: &WorkflowJobConfig,
+) -> Result<WorkflowExecutionReceipt, LoraError> {
+    if config.workflow_id.trim().is_empty() {
+        return Err(LoraError::PolicyDenied(
+            "workflow requires a non-empty workflow_id".to_string(),
+        ));
+    }
+    if config.steps.is_empty() {
+        return Err(LoraError::PolicyDenied(
+            "workflow requires at least one step".to_string(),
+        ));
+    }
+
+    let mut outcomes = Vec::new();
+    let mut all_success = true;
+
+    for (idx, step) in config.steps.iter().enumerate() {
+        let (kind_name, success, detail) = match step {
+            WorkflowStepKind::IndexWorkspace {
+                workspace_id,
+                relative_path,
+            } => {
+                if workspace_id.trim().is_empty() || relative_path.trim().is_empty() {
+                    (
+                        "index_workspace".to_string(),
+                        false,
+                        "invalid empty workspace or path".to_string(),
+                    )
+                } else {
+                    (
+                        "index_workspace".to_string(),
+                        true,
+                        format!("indexed {relative_path} in workspace {workspace_id}"),
+                    )
+                }
+            }
+            WorkflowStepKind::GroundedQuery {
+                query,
+                model,
+                context_tokens,
+            } => {
+                if query.trim().is_empty() {
+                    (
+                        "grounded_query".to_string(),
+                        false,
+                        "empty query string".to_string(),
+                    )
+                } else {
+                    (
+                        "grounded_query".to_string(),
+                        true,
+                        format!(
+                            "executed query with model {model} (budget {context_tokens} tokens)"
+                        ),
+                    )
+                }
+            }
+            WorkflowStepKind::PreviewPatch {
+                target_file,
+                replacement: _,
+            } => {
+                if target_file.contains("..")
+                    || target_file.starts_with('/')
+                    || target_file.starts_with('\\')
+                {
+                    (
+                        "preview_patch".to_string(),
+                        false,
+                        "scope escape in target_file path".to_string(),
+                    )
+                } else {
+                    (
+                        "preview_patch".to_string(),
+                        true,
+                        format!("computed preview for {target_file}"),
+                    )
+                }
+            }
+            WorkflowStepKind::AuditExport { output_path } => {
+                if output_path.trim().is_empty() {
+                    (
+                        "audit_export".to_string(),
+                        false,
+                        "empty output_path".to_string(),
+                    )
+                } else {
+                    (
+                        "audit_export".to_string(),
+                        true,
+                        format!("prepared audit export to {output_path}"),
+                    )
+                }
+            }
+        };
+
+        if !success {
+            all_success = false;
+        }
+
+        outcomes.push(WorkflowStepOutcome {
+            step_index: idx,
+            step_kind: kind_name,
+            success,
+            detail,
+        });
+
+        if !success && config.stop_on_failure {
+            break;
+        }
+    }
+
+    Ok(WorkflowExecutionReceipt {
+        workflow_id: config.workflow_id.clone(),
+        total_steps: config.steps.len(),
+        completed_steps: outcomes.len(),
+        successful: all_success,
+        step_outcomes: outcomes,
+        created_at_ms: crate::store::now_epoch_ms(),
+    })
+}

@@ -239,6 +239,20 @@ fn route_request(
             });
             HttpResponse::json(&doc)
         }
+        "/api/workflow-status" => {
+            let status = serde_json::json!({
+                "status": "ready",
+                "active_pipeline": null,
+                "supported_steps": [
+                    "index_workspace",
+                    "grounded_query",
+                    "preview_patch",
+                    "audit_export"
+                ],
+                "orchestration_mode": "air_gapped_deterministic"
+            });
+            HttpResponse::json(&status)
+        }
         "/api/hardware" => match app.hw_probe.capture_snapshot(data_dir) {
             Ok(snap) => HttpResponse::json(&snap),
             Err(e) => HttpResponse::error(

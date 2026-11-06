@@ -212,6 +212,10 @@
           <p><strong>Window:</strong> <span id="budget-window">2048</span> tokens | <strong>Reserved Output:</strong> <span id="budget-output">512</span> tokens</p>
           <p><strong>Allocated:</strong> <span id="budget-allocated">1088</span> tokens | <strong>Remaining Headroom:</strong> <span id="budget-headroom">960</span> tokens</p>
         </div>
+        <div class="card" id="workflow-live" hidden>
+          <h2>Workflow Orchestrator Pipeline</h2>
+          <p><strong>Status:</strong> <span id="wf-status">Ready</span> | <strong>Mode:</strong> Air-Gapped Deterministic</p>
+        </div>
       </section>
 
       <section id="screen-model-library" class="screen" aria-labelledby="h-models">
@@ -415,8 +419,15 @@
         document.getElementById('doctor-live').hidden = false;
       }
     };
+    const loadWorkflow = async () => {
+      const w = await getJson('/api/workflow-status');
+      if (w && w.status) {
+        document.getElementById('wf-status').textContent = w.status;
+        document.getElementById('workflow-live').hidden = false;
+      }
+    };
     if (location.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)) {
-      Promise.allSettled([loadDashboard(), loadModels(), loadPlugins(), loadTuning(), loadAudit(), loadBudget(), loadBroker(), loadDoctor()]).then((results) => {
+      Promise.allSettled([loadDashboard(), loadModels(), loadPlugins(), loadTuning(), loadAudit(), loadBudget(), loadBroker(), loadDoctor(), loadWorkflow()]).then((results) => {
         const failed = results.filter((r) => r.status === 'rejected').length;
         announce(failed ? 'Live runtime data partially unavailable.' : 'Live runtime data loaded.');
       });

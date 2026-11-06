@@ -2089,3 +2089,42 @@ fn cli_catalog_context_budget_and_broker_execution() {
     let stdout_handoff = String::from_utf8_lossy(&out_handoff.stdout);
     assert!(stdout_handoff.contains("Specialist handoff verified: run-parent-42 -> run-child-43"));
 }
+
+#[test]
+fn workflow_pipeline_execution_and_step_accounting() {
+    use lora_core::{execute_workflow_job, WorkflowJobConfig, WorkflowStepKind};
+
+    let cfg = WorkflowJobConfig {
+        workflow_id: "wf-pipeline-01".to_string(),
+        title: "E2E Workflow Test".to_string(),
+        steps: vec![
+            WorkflowStepKind::IndexWorkspace {
+                workspace_id: "ws-test".to_string(),
+                relative_path: "docs/ARCHITECTURE.md".to_string(),
+            },
+            WorkflowStepKind::GroundedQuery {
+                query: "Summarize architecture".to_string(),
+                model: "qwen2.5".to_string(),
+                context_tokens: 2048,
+            },
+            WorkflowStepKind::PreviewPatch {
+                target_file: "docs/TEST.md".to_string(),
+                replacement: "new text".to_string(),
+            },
+            WorkflowStepKind::AuditExport {
+                output_path: "audit.json".to_string(),
+            },
+        ],
+        stop_on_failure: true,
+    };
+
+    let receipt = execute_workflow_job(&cfg).expect("execute workflow");
+    assert_eq!(receipt.total_steps, 4);
+    assert_eq!(receipt.completed_steps, 4);
+    assert!(receipt.successful);
+    assert_eq!(receipt.step_outcomes.len(), 4);
+    assert!(receipt.step_outcomes[0].success);
+    assert!(receipt.step_outcomes[1].success);
+    assert!(receipt.step_outcomes[2].success);
+    assert!(receipt.step_outcomes[3].success);
+}

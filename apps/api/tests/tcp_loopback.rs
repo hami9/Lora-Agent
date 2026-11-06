@@ -37,6 +37,7 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(openapi_str.contains("\"/v1/doctor\""));
     assert!(openapi_str.contains("\"/v1/models/classify\""));
     assert!(openapi_str.contains("\"/v1/agent/handoff\""));
+    assert!(openapi_str.contains("\"/v1/workflow/run\""));
 
     // 2. Spawn live `lora-api --once` on loopback port and send authenticated GET /v1/capabilities
     let bind_addr = find_free_loopback_addr();
@@ -81,6 +82,7 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(resp.contains("\"agent.handoff\""));
     assert!(resp.contains("\"models.classify\""));
     assert!(resp.contains("\"system.doctor\""));
+    assert!(resp.contains("\"workflow.run\""));
 
     // 3. Import a synthetic GGUF fixture into the store so we can test live execution over TCP
     {
@@ -142,7 +144,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "48",
+            "50",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -840,6 +842,67 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r48.starts_with("HTTP/1.1 400 Bad Request"));
     assert!(r48.contains("budget_exhausted"));
     assert!(r48.contains("cycle detected"));
+
+    // (at) POST /v1/workflow/run executes composed pipeline
+    let body_wf_ok = serde_json::json!({
+        "workflow": {
+            "workflow_id": "wf-test-01",
+            "title": "Verification Pipeline",
+            "steps": [
+                {
+                    "index_workspace": {
+                        "workspace_id": "ws-default",
+                        "relative_path": "docs/ARCHITECTURE.md"
+                    }
+                },
+                {
+                    "grounded_query": {
+                        "query": "What is the policy gate revision?",
+                        "model": "qwen2.5-coder-7b",
+                        "context_tokens": 2048
+                    }
+                },
+                {
+                    "preview_patch": {
+                        "target_file": "docs/TEST.md",
+                        "replacement": "updated content"
+                    }
+                },
+                {
+                    "audit_export": {
+                        "output_path": "audit_pipeline.json"
+                    }
+                }
+            ],
+            "stop_on_failure": true
+        }
+    })
+    .to_string();
+    let r49 = send_http(&format!(
+        "POST /v1/workflow/run HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_wf_ok}",
+        body_wf_ok.len()
+    ));
+    assert!(r49.starts_with("HTTP/1.1 200 OK"));
+    assert!(r49.contains("\"total_steps\":4"));
+    assert!(r49.contains("\"completed_steps\":4"));
+    assert!(r49.contains("\"successful\":true"));
+
+    // (au) POST /v1/workflow/run rejects empty steps list
+    let body_wf_bad = serde_json::json!({
+        "workflow": {
+            "workflow_id": "wf-empty",
+            "title": "Empty steps",
+            "steps": [],
+            "stop_on_failure": true
+        }
+    })
+    .to_string();
+    let r50 = send_http(&format!(
+        "POST /v1/workflow/run HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_wf_bad}",
+        body_wf_bad.len()
+    ));
+    assert!(r50.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(r50.contains("policy_denied"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());
