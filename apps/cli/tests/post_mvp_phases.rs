@@ -2371,10 +2371,9 @@ fn workflow_pipeline_execution_and_step_accounting() {
     assert!(stdout_demo_retries.contains("Successful      : true"));
 
     // Verify WorkflowStepKind::VerifyDigest execution and validation
-    let sample_file = tmp.path().join("digest_fixture.txt");
-    std::fs::write(&sample_file, b"lora agent payload 2026").expect("write fixture");
     use sha2::{Digest, Sha256};
-    let valid_sha = hex::encode(Sha256::digest(b"lora agent payload 2026"));
+    let cargo_bytes = std::fs::read("Cargo.toml").expect("read Cargo.toml for fixture");
+    let valid_sha = hex::encode(Sha256::digest(&cargo_bytes));
     let mismatch_sha =
         "0000000000000000000000000000000000000000000000000000000000000000".to_string();
 
@@ -2383,11 +2382,11 @@ fn workflow_pipeline_execution_and_step_accounting() {
         title: "Digest Check".to_string(),
         steps: vec![
             WorkflowStepKind::VerifyDigest {
-                target_file: sample_file.to_str().unwrap().to_string(),
-                expected_sha256: valid_sha.clone(),
+                target_file: "Cargo.toml".to_string(),
+                expected_sha256: valid_sha,
             },
             WorkflowStepKind::VerifyDigest {
-                target_file: sample_file.to_str().unwrap().to_string(),
+                target_file: "Cargo.toml".to_string(),
                 expected_sha256: mismatch_sha,
             },
         ],
@@ -2406,6 +2405,27 @@ fn workflow_pipeline_execution_and_step_accounting() {
     assert!(digest_receipt.step_outcomes[1]
         .detail
         .contains("digest mismatch"));
+
+    // Verify scope escape rejection for VerifyDigest
+    let escaped_digest_cfg = WorkflowJobConfig {
+        workflow_id: "wf-digest-escaped".to_string(),
+        title: "Digest Scope Escape".to_string(),
+        steps: vec![WorkflowStepKind::VerifyDigest {
+            target_file: "../escaped.txt".to_string(),
+            expected_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
+        }],
+        stop_on_failure: true,
+        max_duration_ms: None,
+        max_step_retries: None,
+        non_fatal_step_indices: None,
+    };
+    let val_escaped = lora_core::validate_workflow_job(&escaped_digest_cfg);
+    assert!(!val_escaped.valid);
+    assert!(val_escaped
+        .issues
+        .iter()
+        .any(|i| i.contains("scope escape in target_file path")));
 
     // Verify non_fatal_step_indices allows pipeline completion despite step failure
     let mut bad_nf_cfg = cfg.clone();
