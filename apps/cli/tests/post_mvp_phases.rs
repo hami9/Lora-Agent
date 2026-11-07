@@ -2505,4 +2505,34 @@ fn workflow_pipeline_execution_and_step_accounting() {
     let stdout_demo_nf = String::from_utf8_lossy(&out_demo_nf.stdout);
     assert!(stdout_demo_nf.contains("Workflow Execution Receipt"));
     assert!(stdout_demo_nf.contains("Successful      : true"));
+    assert!(stdout_demo_nf.contains("Config SHA-256  :"));
+    assert!(stdout_demo_nf.contains("Receipt SHA-256 :"));
+
+    // Verify cryptographic workflow config & receipt attestation digests (v0.2.10)
+    let cfg_digest_1 = lora_core::compute_workflow_config_digest(&non_fatal_job);
+    let cfg_digest_2 = lora_core::compute_workflow_config_digest(&non_fatal_job);
+    assert_eq!(cfg_digest_1.len(), 64);
+    assert_eq!(cfg_digest_1, cfg_digest_2);
+    assert_eq!(nf_receipt.config_sha256, cfg_digest_1);
+    assert_eq!(nf_receipt.receipt_sha256.len(), 64);
+
+    // Unmodified receipt passes cryptographic attestation verification
+    lora_core::verify_workflow_receipt(&non_fatal_job, &nf_receipt)
+        .expect("verify unmodified workflow receipt");
+
+    // Tampering with any step outcome fails closed with DigestMismatch
+    let mut tampered_receipt = nf_receipt.clone();
+    tampered_receipt.step_outcomes[0].success = true;
+    assert!(matches!(
+        lora_core::verify_workflow_receipt(&non_fatal_job, &tampered_receipt),
+        Err(lora_core::LoraError::DigestMismatch { .. })
+    ));
+
+    // Tampering with the workflow config fails closed with DigestMismatch
+    let mut altered_job = non_fatal_job.clone();
+    altered_job.title = "Tampered Title".to_string();
+    assert!(matches!(
+        lora_core::verify_workflow_receipt(&altered_job, &nf_receipt),
+        Err(lora_core::LoraError::DigestMismatch { .. })
+    ));
 }

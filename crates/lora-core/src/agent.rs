@@ -946,6 +946,10 @@ pub struct WorkflowExecutionReceipt {
     pub total_duration_ms: u64,
     #[serde(default)]
     pub deadline_exceeded: bool,
+    #[serde(default)]
+    pub config_sha256: String,
+    #[serde(default)]
+    pub receipt_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -963,6 +967,153 @@ pub struct WorkflowValidationReceipt {
     pub total_steps: usize,
     pub step_validations: Vec<WorkflowStepValidation>,
     pub issues: Vec<String>,
+    #[serde(default)]
+    pub config_sha256: String,
+}
+
+fn update_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// Compute a deterministic, domain-separated SHA-256 digest (`lora.workflow.config.v1`)
+/// over a canonical `WorkflowJobConfig` specification.
+pub fn compute_workflow_config_digest(config: &WorkflowJobConfig) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"lora.workflow.config.v1\0");
+    update_len_prefixed(&mut hasher, config.workflow_id.as_bytes());
+    update_len_prefixed(&mut hasher, config.title.as_bytes());
+    hasher.update([u8::from(config.stop_on_failure)]);
+    match config.max_duration_ms {
+        Some(ms) => {
+            hasher.update([1u8]);
+            hasher.update(ms.to_le_bytes());
+        }
+        None => hasher.update([0u8]),
+    }
+    match config.max_step_retries {
+        Some(retries) => {
+            hasher.update([1u8]);
+            hasher.update(retries.to_le_bytes());
+        }
+        None => hasher.update([0u8]),
+    }
+    let mut nf_indices = config.non_fatal_step_indices.clone().unwrap_or_default();
+    nf_indices.sort_unstable();
+    nf_indices.dedup();
+    hasher.update((nf_indices.len() as u64).to_le_bytes());
+    for idx in nf_indices {
+        hasher.update((idx as u64).to_le_bytes());
+    }
+    hasher.update((config.steps.len() as u64).to_le_bytes());
+    for step in &config.steps {
+        match step {
+            WorkflowStepKind::DoctorProbe {
+                min_available_ram_mb,
+            } => {
+                update_len_prefixed(&mut hasher, b"doctor_probe");
+                match min_available_ram_mb {
+                    Some(mb) => {
+                        hasher.update([1u8]);
+                        hasher.update(mb.to_le_bytes());
+                    }
+                    None => hasher.update([0u8]),
+                }
+            }
+            WorkflowStepKind::IndexWorkspace {
+                workspace_id,
+                relative_path,
+            } => {
+                update_len_prefixed(&mut hasher, b"index_workspace");
+                update_len_prefixed(&mut hasher, workspace_id.as_bytes());
+                update_len_prefixed(&mut hasher, relative_path.as_bytes());
+            }
+            WorkflowStepKind::GroundedQuery {
+                query,
+                model,
+                context_tokens,
+            } => {
+                update_len_prefixed(&mut hasher, b"grounded_query");
+                update_len_prefixed(&mut hasher, query.as_bytes());
+                update_len_prefixed(&mut hasher, model.as_bytes());
+                hasher.update(context_tokens.to_le_bytes());
+            }
+            WorkflowStepKind::PreviewPatch {
+                target_file,
+                replacement,
+            } => {
+                update_len_prefixed(&mut hasher, b"preview_patch");
+                update_len_prefixed(&mut hasher, target_file.as_bytes());
+                update_len_prefixed(&mut hasher, replacement.as_bytes());
+            }
+            WorkflowStepKind::AuditExport { output_path } => {
+                update_len_prefixed(&mut hasher, b"audit_export");
+                update_len_prefixed(&mut hasher, output_path.as_bytes());
+            }
+            WorkflowStepKind::VerifyDigest {
+                target_file,
+                expected_sha256,
+            } => {
+                update_len_prefixed(&mut hasher, b"verify_digest");
+                update_len_prefixed(&mut hasher, target_file.as_bytes());
+                update_len_prefixed(&mut hasher, expected_sha256.to_ascii_lowercase().as_bytes());
+            }
+        }
+    }
+    hex::encode(hasher.finalize())
+}
+
+/// Compute a deterministic, domain-separated SHA-256 attestation digest (`lora.workflow.receipt.v1`)
+/// binding a `WorkflowExecutionReceipt` to its `config_sha256` and every step outcome.
+pub fn compute_workflow_receipt_digest(receipt: &WorkflowExecutionReceipt) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"lora.workflow.receipt.v1\0");
+    update_len_prefixed(&mut hasher, receipt.workflow_id.as_bytes());
+    update_len_prefixed(
+        &mut hasher,
+        receipt.config_sha256.to_ascii_lowercase().as_bytes(),
+    );
+    hasher.update((receipt.total_steps as u64).to_le_bytes());
+    hasher.update((receipt.completed_steps as u64).to_le_bytes());
+    hasher.update([u8::from(receipt.successful)]);
+    hasher.update(receipt.created_at_ms.to_le_bytes());
+    hasher.update(receipt.total_duration_ms.to_le_bytes());
+    hasher.update([u8::from(receipt.deadline_exceeded)]);
+    hasher.update((receipt.step_outcomes.len() as u64).to_le_bytes());
+    for out in &receipt.step_outcomes {
+        hasher.update((out.step_index as u64).to_le_bytes());
+        update_len_prefixed(&mut hasher, out.step_kind.as_bytes());
+        hasher.update([u8::from(out.success)]);
+        update_len_prefixed(&mut hasher, out.detail.as_bytes());
+        hasher.update(out.started_at_ms.to_le_bytes());
+        hasher.update(out.duration_ms.to_le_bytes());
+        hasher.update(out.attempts.to_le_bytes());
+        hasher.update([u8::from(out.non_fatal)]);
+    }
+    hex::encode(hasher.finalize())
+}
+
+/// Verify cryptographic integrity of a `WorkflowExecutionReceipt` against its `WorkflowJobConfig`.
+/// Fails closed with `LoraError::DigestMismatch` if either `config_sha256` or `receipt_sha256` was tampered with.
+pub fn verify_workflow_receipt(
+    config: &WorkflowJobConfig,
+    receipt: &WorkflowExecutionReceipt,
+) -> Result<(), LoraError> {
+    let expected_cfg = compute_workflow_config_digest(config);
+    if !receipt.config_sha256.eq_ignore_ascii_case(&expected_cfg) {
+        return Err(LoraError::DigestMismatch {
+            expected: expected_cfg,
+            actual: receipt.config_sha256.clone(),
+        });
+    }
+    let expected_rcpt = compute_workflow_receipt_digest(receipt);
+    if !receipt.receipt_sha256.eq_ignore_ascii_case(&expected_rcpt) {
+        return Err(LoraError::DigestMismatch {
+            expected: expected_rcpt,
+            actual: receipt.receipt_sha256.clone(),
+        });
+    }
+    Ok(())
 }
 
 pub const MAX_VERIFY_DIGEST_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB bounded read cap
@@ -1363,6 +1514,7 @@ pub fn validate_workflow_job(config: &WorkflowJobConfig) -> WorkflowValidationRe
         total_steps: config.steps.len(),
         step_validations,
         issues,
+        config_sha256: compute_workflow_config_digest(config),
     }
 }
 
@@ -1686,7 +1838,7 @@ pub fn execute_workflow_job(
         }
     }
 
-    Ok(WorkflowExecutionReceipt {
+    let mut receipt = WorkflowExecutionReceipt {
         workflow_id: config.workflow_id.clone(),
         total_steps: config.steps.len(),
         completed_steps: outcomes.len(),
@@ -1695,5 +1847,9 @@ pub fn execute_workflow_job(
         created_at_ms: job_start,
         total_duration_ms,
         deadline_exceeded,
-    })
+        config_sha256: compute_workflow_config_digest(config),
+        receipt_sha256: String::new(),
+    };
+    receipt.receipt_sha256 = compute_workflow_receipt_digest(&receipt);
+    Ok(receipt)
 }

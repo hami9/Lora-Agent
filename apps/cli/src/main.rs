@@ -3,16 +3,16 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use lora_core::{
     allocate_context_budget, apply_approved_patch, classify_artifact_compatibility,
-    default_risk_register_matrix, evaluate_adapter_promotion_gate, execute_workflow_job,
-    format_multi_turn_prompt, now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch,
-    rollback_applied_patch, validate_catalog_variant, validate_specialist_handoff,
-    validate_workflow_job, AgentLimits, ApprovalDecision, ApprovalPromptPort, ApprovalRequest,
-    BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor, ChatTurn,
-    CompensatingPatchReceipt, ContextBudgetRequest, ExecutionMode, ExtensionManifestV1,
-    HardwareProbePort, HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig,
-    PatchProposal, PrivilegedBrokerGate, SpecialistHandoffEnvelope, TrainingExample,
-    TuningCacheKey, TuningProfile, TuningTrialSample, WorkflowJobConfig, WorkflowStepKind,
-    DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
+    compute_workflow_config_digest, default_risk_register_matrix, evaluate_adapter_promotion_gate,
+    execute_workflow_job, format_multi_turn_prompt, now_epoch_ms, prepare_leakage_free_splits,
+    preview_checked_patch, rollback_applied_patch, validate_catalog_variant,
+    validate_specialist_handoff, validate_workflow_job, AgentLimits, ApprovalDecision,
+    ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit, BrokerVerb,
+    CatalogVariantDescriptor, ChatTurn, CompensatingPatchReceipt, ContextBudgetRequest,
+    ExecutionMode, ExtensionManifestV1, HardwareProbePort, HeldOutEvaluationReceipt,
+    LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
+    SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
+    WorkflowJobConfig, WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -439,6 +439,9 @@ enum Commands {
         /// Optional comma-separated 0-based step indices that do not abort pipeline on failure
         #[arg(long, value_delimiter = ',')]
         non_fatal_steps: Option<Vec<usize>>,
+        /// Optional expected 64-char hex SHA-256 digest of the canonical workflow config
+        #[arg(long)]
+        expected_config_sha256: Option<String>,
     },
 }
 
@@ -1427,6 +1430,7 @@ fn main() {
             max_duration_ms,
             max_step_retries,
             non_fatal_steps,
+            expected_config_sha256,
         } => {
             if let Some(keep) = prune_keep {
                 let deleted = app.store.prune_workflow_receipts(keep)?;
@@ -1512,10 +1516,21 @@ fn main() {
                 job_config.non_fatal_step_indices = Some(indices);
             }
 
+            if let Some(ref expected_sha) = expected_config_sha256 {
+                let actual_sha = compute_workflow_config_digest(&job_config);
+                if !actual_sha.eq_ignore_ascii_case(expected_sha) {
+                    return Err(LoraError::DigestMismatch {
+                        expected: expected_sha.clone(),
+                        actual: actual_sha,
+                    });
+                }
+            }
+
             if validate {
                 let report = validate_workflow_job(&job_config);
                 println!("=== Workflow Validation Receipt ===");
                 println!("Workflow ID : {}", report.workflow_id);
+                println!("Config SHA  : {}", report.config_sha256);
                 println!("Total Steps : {}", report.total_steps);
                 println!("Valid       : {}", report.valid);
                 if let Some(lim) = job_config.max_duration_ms {
@@ -1554,6 +1569,8 @@ fn main() {
             let _ = app.store.record_workflow_receipt(&receipt);
             println!("=== Workflow Execution Receipt ===");
             println!("Workflow ID     : {}", receipt.workflow_id);
+            println!("Config SHA-256  : {}", receipt.config_sha256);
+            println!("Receipt SHA-256 : {}", receipt.receipt_sha256);
             println!("Total Steps     : {}", receipt.total_steps);
             println!("Completed Steps : {}", receipt.completed_steps);
             println!("Successful      : {}", receipt.successful);

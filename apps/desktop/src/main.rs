@@ -257,7 +257,8 @@ fn route_request(
                 "step_retries_supported": true,
                 "max_step_retries_cap": 10,
                 "non_fatal_steps_supported": true,
-                "scoped_path_guard": true
+                "scoped_path_guard": true,
+                "receipt_attestation": true
             });
             HttpResponse::json(&status)
         }

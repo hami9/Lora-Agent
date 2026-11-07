@@ -25,8 +25,9 @@ pub use admission::{
     ReservationLease, TuningProfile, DEFAULT_SAFETY_RESERVE_BYTES, RUNTIME_SCRATCH_BYTES,
 };
 pub use agent::{
-    execute_workflow_job, validate_specialist_handoff, validate_structured_proposal,
-    validate_workflow_job, validate_workflow_relative_path, AgentLimits, AgentRunOutcome,
+    compute_workflow_config_digest, compute_workflow_receipt_digest, execute_workflow_job,
+    validate_specialist_handoff, validate_structured_proposal, validate_workflow_job,
+    validate_workflow_relative_path, verify_workflow_receipt, AgentLimits, AgentRunOutcome,
     BoundedAgentRuntime, CitedEvidence, SpecialistHandoffEnvelope, ToolReceipt,
     WorkflowExecutionReceipt, WorkflowJobConfig, WorkflowStepKind, WorkflowStepOutcome,
     WorkflowStepValidation, WorkflowValidationReceipt, DEFAULT_MAX_FILE_BYTES,

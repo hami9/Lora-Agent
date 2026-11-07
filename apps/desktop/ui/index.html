@@ -214,7 +214,7 @@
         </div>
         <div class="card" id="workflow-live" hidden>
           <h2>Workflow Orchestrator Pipeline</h2>
-          <p><strong>Status:</strong> <span id="wf-status">Ready</span> | <strong>Mode:</strong> Air-Gapped Deterministic | <strong>Past Receipts:</strong> <span id="wf-receipts-count">0</span> | <strong>Latest Latency:</strong> <span id="wf-latest-duration">--</span> | <strong>Deadline Guard:</strong> <span id="wf-deadline-guard">Active</span> | <strong>Step Retries:</strong> <span id="wf-step-retries">Active (≤10)</span> | <strong>Fault Tolerance:</strong> <span id="wf-fault-tolerance">Non-Fatal Steps</span> | <strong>Path Guard:</strong> <span id="wf-path-guard">Scoped</span></p>
+          <p><strong>Status:</strong> <span id="wf-status">Ready</span> | <strong>Mode:</strong> Air-Gapped Deterministic | <strong>Past Receipts:</strong> <span id="wf-receipts-count">0</span> | <strong>Latest Latency:</strong> <span id="wf-latest-duration">--</span> | <strong>Deadline Guard:</strong> <span id="wf-deadline-guard">Active</span> | <strong>Step Retries:</strong> <span id="wf-step-retries">Active (≤10)</span> | <strong>Fault Tolerance:</strong> <span id="wf-fault-tolerance">Non-Fatal Steps</span> | <strong>Path Guard:</strong> <span id="wf-path-guard">Scoped</span> | <strong>Attestation:</strong> <span id="wf-attestation">SHA-256 Bound</span></p>
         </div>
       </section>
 
@@ -433,6 +433,12 @@
           const ftEl = document.getElementById('wf-fault-tolerance');
           if (ftEl) {
             ftEl.textContent = 'Active (Non-Fatal Gating)';
+          }
+        }
+        if (w.receipt_attestation) {
+          const attEl = document.getElementById('wf-attestation');
+          if (attEl) {
+            attEl.textContent = 'SHA-256 Bound';
           }
         }
         document.getElementById('workflow-live').hidden = false;
