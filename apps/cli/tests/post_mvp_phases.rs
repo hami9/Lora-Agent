@@ -2383,7 +2383,7 @@ fn workflow_pipeline_execution_and_step_accounting() {
         steps: vec![
             WorkflowStepKind::VerifyDigest {
                 target_file: "Cargo.toml".to_string(),
-                expected_sha256: valid_sha,
+                expected_sha256: valid_sha.clone(),
             },
             WorkflowStepKind::VerifyDigest {
                 target_file: "Cargo.toml".to_string(),
@@ -2405,27 +2405,54 @@ fn workflow_pipeline_execution_and_step_accounting() {
     assert!(digest_receipt.step_outcomes[1]
         .detail
         .contains("digest mismatch"));
+    assert!(
+        !digest_receipt.step_outcomes[1].detail.contains(&valid_sha),
+        "mismatch error must never leak actual file SHA-256"
+    );
 
-    // Verify scope escape rejection for VerifyDigest
-    let escaped_digest_cfg = WorkflowJobConfig {
-        workflow_id: "wf-digest-escaped".to_string(),
-        title: "Digest Scope Escape".to_string(),
-        steps: vec![WorkflowStepKind::VerifyDigest {
-            target_file: "../escaped.txt".to_string(),
-            expected_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
-                .to_string(),
-        }],
-        stop_on_failure: true,
-        max_duration_ms: None,
-        max_step_retries: None,
-        non_fatal_step_indices: None,
-    };
-    let val_escaped = lora_core::validate_workflow_job(&escaped_digest_cfg);
-    assert!(!val_escaped.valid);
-    assert!(val_escaped
-        .issues
-        .iter()
-        .any(|i| i.contains("scope escape in target_file path")));
+    // Verify scope escape rejection for VerifyDigest (traversal, drive-prefixed, UNC, secret files, reserved devices)
+    for bad_path in [
+        "../escaped.txt",
+        "C:/Windows/win.ini",
+        "C:relative.txt",
+        "\\\\server\\share\\file.txt",
+        "/etc/passwd",
+        ".env",
+        "config/.env.production",
+        "keys/id_rsa",
+        "certs/server.key",
+        "CON",
+        "docs/NUL.txt",
+    ] {
+        assert!(
+            lora_core::validate_workflow_relative_path(bad_path).is_err(),
+            "expected {bad_path} to be rejected by validate_workflow_relative_path"
+        );
+        let escaped_digest_cfg = WorkflowJobConfig {
+            workflow_id: "wf-digest-escaped".to_string(),
+            title: "Digest Scope Escape".to_string(),
+            steps: vec![WorkflowStepKind::VerifyDigest {
+                target_file: bad_path.to_string(),
+                expected_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+            }],
+            stop_on_failure: true,
+            max_duration_ms: None,
+            max_step_retries: None,
+            non_fatal_step_indices: None,
+        };
+        let val_escaped = lora_core::validate_workflow_job(&escaped_digest_cfg);
+        assert!(!val_escaped.valid, "validator must reject {bad_path}");
+        assert!(val_escaped
+            .issues
+            .iter()
+            .any(|i| i.contains("scope escape in target_file path")));
+        let exec_escaped = execute_workflow_job(&escaped_digest_cfg).expect("execute escaped cfg");
+        assert!(!exec_escaped.successful);
+        assert!(exec_escaped.step_outcomes[0]
+            .detail
+            .contains("scope escape in target_file path"));
+    }
 
     // Verify non_fatal_step_indices allows pipeline completion despite step failure
     let mut bad_nf_cfg = cfg.clone();

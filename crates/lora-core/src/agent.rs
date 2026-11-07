@@ -965,6 +965,216 @@ pub struct WorkflowValidationReceipt {
     pub issues: Vec<String>,
 }
 
+pub const MAX_VERIFY_DIGEST_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB bounded read cap
+
+fn is_windows_reserved_device(component: &str) -> bool {
+    let stem = component.split('.').next().unwrap_or(component).trim();
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+/// Strictly validate a workflow relative path against traversal (`..`), drive prefixes (`C:`),
+/// UNC/root prefixes, alternate data streams (`:`), reserved device names, and excluded secret files.
+pub fn validate_workflow_relative_path(raw_path: &str) -> Result<Vec<String>, &'static str> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() || raw_path.len() > 512 || trimmed.len() != raw_path.len() {
+        return Err("empty or oversized path");
+    }
+    if raw_path.contains('\0') {
+        return Err("scope escape in path (embedded NUL)");
+    }
+    if raw_path.starts_with('/')
+        || raw_path.starts_with('\\')
+        || raw_path.contains(':')
+        || raw_path.starts_with('~')
+    {
+        return Err("scope escape in path (absolute, UNC, or drive-prefixed path)");
+    }
+    for comp in std::path::Path::new(raw_path).components() {
+        if !matches!(comp, std::path::Component::Normal(_)) {
+            return Err("scope escape in path");
+        }
+    }
+    let normalized = raw_path.replace('\\', "/");
+    let mut parts = Vec::new();
+    for part in normalized.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err("scope escape in path");
+        }
+        if part.ends_with('.') || part.ends_with(' ') || is_windows_reserved_device(part) {
+            return Err("scope escape in path (reserved or ambiguous component)");
+        }
+        parts.push(part.to_string());
+    }
+    if parts.is_empty() || parts.len() > 32 {
+        return Err("scope escape in path (component depth out of bounds)");
+    }
+    if is_excluded_secret_resource(&normalized) {
+        return Err("excluded secret resource path denied by policy");
+    }
+    Ok(parts)
+}
+
+fn verify_scoped_file_digest(
+    components: &[String],
+    target_display: &str,
+    expected_sha256: &str,
+) -> (String, bool, String) {
+    use std::io::Read;
+    let cwd = match std::env::current_dir().and_then(|p| p.canonicalize()) {
+        Ok(dir) => dir,
+        Err(_) => {
+            return (
+                "verify_digest".to_string(),
+                false,
+                "workspace root unavailable".to_string(),
+            )
+        }
+    };
+    let mut current = cwd.clone();
+    for (idx, comp) in components.iter().enumerate() {
+        current.push(comp);
+        let sym_meta = match std::fs::symlink_metadata(&current) {
+            Ok(m) => m,
+            Err(_) => {
+                return (
+                    "verify_digest".to_string(),
+                    false,
+                    format!("target file not found or inaccessible: {target_display}"),
+                )
+            }
+        };
+        if sym_meta.file_type().is_symlink() {
+            return (
+                "verify_digest".to_string(),
+                false,
+                format!("scope escape in target_file path (symlink rejected: {target_display})"),
+            );
+        }
+        let is_last = idx + 1 == components.len();
+        if !is_last && !sym_meta.is_dir() {
+            return (
+                "verify_digest".to_string(),
+                false,
+                format!("invalid intermediate directory component in {target_display}"),
+            );
+        }
+        if is_last && !sym_meta.is_file() {
+            return (
+                "verify_digest".to_string(),
+                false,
+                format!("target is not a regular file: {target_display}"),
+            );
+        }
+    }
+    let canonical_target = match current.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                "verify_digest".to_string(),
+                false,
+                format!("cannot canonicalize target file: {target_display}"),
+            )
+        }
+    };
+    if !canonical_target.starts_with(&cwd) {
+        return (
+            "verify_digest".to_string(),
+            false,
+            format!("scope escape in target_file path: {target_display}"),
+        );
+    }
+    let file = match std::fs::File::open(&canonical_target) {
+        Ok(f) => f,
+        Err(_) => {
+            return (
+                "verify_digest".to_string(),
+                false,
+                format!("target file not found or inaccessible: {target_display}"),
+            )
+        }
+    };
+    if let Ok(meta) = file.metadata() {
+        if meta.len() > MAX_VERIFY_DIGEST_BYTES {
+            return (
+                "verify_digest".to_string(),
+                false,
+                format!(
+                    "target file exceeds maximum digest verification size ({} bytes): {target_display}",
+                    MAX_VERIFY_DIGEST_BYTES
+                ),
+            );
+        }
+    }
+    let mut reader = file.take(MAX_VERIFY_DIGEST_BYTES + 1);
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    let mut total_read = 0u64;
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                total_read += n as u64;
+                if total_read > MAX_VERIFY_DIGEST_BYTES {
+                    return (
+                        "verify_digest".to_string(),
+                        false,
+                        format!(
+                            "target file exceeds maximum digest verification size ({} bytes): {target_display}",
+                            MAX_VERIFY_DIGEST_BYTES
+                        ),
+                    );
+                }
+                hasher.update(&buf[..n]);
+            }
+            Err(_) => {
+                return (
+                    "verify_digest".to_string(),
+                    false,
+                    format!("failed reading target file: {target_display}"),
+                )
+            }
+        }
+    }
+    let actual_sha = hex::encode(hasher.finalize());
+    if actual_sha.eq_ignore_ascii_case(expected_sha256) {
+        (
+            "verify_digest".to_string(),
+            true,
+            format!("cryptographic digest verified for {target_display} ({expected_sha256})"),
+        )
+    } else {
+        (
+            "verify_digest".to_string(),
+            false,
+            format!("digest mismatch for {target_display} (expected {expected_sha256})"),
+        )
+    }
+}
+
 /// Perform structural and parameter bounds validation of a workflow configuration without execution (`docs/AGENT_RUNTIME.md`).
 pub fn validate_workflow_job(config: &WorkflowJobConfig) -> WorkflowValidationReceipt {
     let mut issues = Vec::new();
@@ -1025,14 +1235,11 @@ pub fn validate_workflow_job(config: &WorkflowJobConfig) -> WorkflowValidationRe
                         false,
                         "invalid empty workspace_id or relative_path".to_string(),
                     )
-                } else if relative_path.contains("..")
-                    || relative_path.starts_with('/')
-                    || relative_path.starts_with('\\')
-                {
+                } else if let Err(reason) = validate_workflow_relative_path(relative_path) {
                     (
                         "index_workspace",
                         false,
-                        "scope escape in relative_path".to_string(),
+                        format!("scope escape in relative_path ({reason})"),
                     )
                 } else {
                     (
@@ -1077,14 +1284,11 @@ pub fn validate_workflow_job(config: &WorkflowJobConfig) -> WorkflowValidationRe
             } => {
                 if target_file.trim().is_empty() {
                     ("preview_patch", false, "empty target_file path".to_string())
-                } else if target_file.contains("..")
-                    || target_file.starts_with('/')
-                    || target_file.starts_with('\\')
-                {
+                } else if let Err(reason) = validate_workflow_relative_path(target_file) {
                     (
                         "preview_patch",
                         false,
-                        "scope escape in target_file path".to_string(),
+                        format!("scope escape in target_file path ({reason})"),
                     )
                 } else {
                     (
@@ -1097,14 +1301,11 @@ pub fn validate_workflow_job(config: &WorkflowJobConfig) -> WorkflowValidationRe
             WorkflowStepKind::AuditExport { output_path } => {
                 if output_path.trim().is_empty() {
                     ("audit_export", false, "empty output_path".to_string())
-                } else if output_path.contains("..")
-                    || output_path.starts_with('/')
-                    || output_path.starts_with('\\')
-                {
+                } else if let Err(reason) = validate_workflow_relative_path(output_path) {
                     (
                         "audit_export",
                         false,
-                        "scope escape in output_path".to_string(),
+                        format!("scope escape in output_path ({reason})"),
                     )
                 } else {
                     (
@@ -1120,14 +1321,11 @@ pub fn validate_workflow_job(config: &WorkflowJobConfig) -> WorkflowValidationRe
             } => {
                 if target_file.trim().is_empty() {
                     ("verify_digest", false, "empty target_file path".to_string())
-                } else if target_file.contains("..")
-                    || target_file.starts_with('/')
-                    || target_file.starts_with('\\')
-                {
+                } else if let Err(reason) = validate_workflow_relative_path(target_file) {
                     (
                         "verify_digest",
                         false,
-                        "scope escape in target_file path".to_string(),
+                        format!("scope escape in target_file path ({reason})"),
                     )
                 } else if expected_sha256.len() != 64
                     || !expected_sha256.chars().all(|c| c.is_ascii_hexdigit())
@@ -1280,14 +1478,11 @@ pub fn execute_workflow_job(
                             false,
                             "invalid empty workspace or path".to_string(),
                         )
-                    } else if relative_path.contains("..")
-                        || relative_path.starts_with('/')
-                        || relative_path.starts_with('\\')
-                    {
+                    } else if let Err(reason) = validate_workflow_relative_path(relative_path) {
                         (
                             "index_workspace".to_string(),
                             false,
-                            "scope escape in relative_path".to_string(),
+                            format!("scope escape in relative_path ({reason})"),
                         )
                     } else {
                         (
@@ -1322,14 +1517,17 @@ pub fn execute_workflow_job(
                     target_file,
                     replacement: _,
                 } => {
-                    if target_file.contains("..")
-                        || target_file.starts_with('/')
-                        || target_file.starts_with('\\')
-                    {
+                    if target_file.trim().is_empty() {
                         (
                             "preview_patch".to_string(),
                             false,
-                            "scope escape in target_file path".to_string(),
+                            "empty target_file path".to_string(),
+                        )
+                    } else if let Err(reason) = validate_workflow_relative_path(target_file) {
+                        (
+                            "preview_patch".to_string(),
+                            false,
+                            format!("scope escape in target_file path ({reason})"),
                         )
                     } else {
                         (
@@ -1346,14 +1544,11 @@ pub fn execute_workflow_job(
                             false,
                             "empty output_path".to_string(),
                         )
-                    } else if output_path.contains("..")
-                        || output_path.starts_with('/')
-                        || output_path.starts_with('\\')
-                    {
+                    } else if let Err(reason) = validate_workflow_relative_path(output_path) {
                         (
                             "audit_export".to_string(),
                             false,
-                            "scope escape in output_path".to_string(),
+                            format!("scope escape in output_path ({reason})"),
                         )
                     } else {
                         (
@@ -1373,51 +1568,31 @@ pub fn execute_workflow_job(
                             false,
                             "empty target_file path".to_string(),
                         )
-                    } else if target_file.contains("..")
-                        || target_file.starts_with('/')
-                        || target_file.starts_with('\\')
-                    {
-                        (
-                            "verify_digest".to_string(),
-                            false,
-                            "scope escape in target_file path".to_string(),
-                        )
-                    } else if expected_sha256.len() != 64
-                        || !expected_sha256.chars().all(|c| c.is_ascii_hexdigit())
-                    {
-                        (
-                            "verify_digest".to_string(),
-                            false,
-                            "invalid expected_sha256 format (must be 64-char hex string)"
-                                .to_string(),
-                        )
                     } else {
-                        match std::fs::read(target_file) {
-                            Ok(bytes) => {
-                                let actual_sha = hex::encode(Sha256::digest(&bytes));
-                                if actual_sha.eq_ignore_ascii_case(expected_sha256) {
-                                    (
-                                        "verify_digest".to_string(),
-                                        true,
-                                        format!(
-                                            "cryptographic digest verified for {target_file} ({expected_sha256})"
-                                        ),
-                                    )
-                                } else {
+                        match validate_workflow_relative_path(target_file) {
+                            Err(reason) => (
+                                "verify_digest".to_string(),
+                                false,
+                                format!("scope escape in target_file path ({reason})"),
+                            ),
+                            Ok(components) => {
+                                if expected_sha256.len() != 64
+                                    || !expected_sha256.chars().all(|c| c.is_ascii_hexdigit())
+                                {
                                     (
                                         "verify_digest".to_string(),
                                         false,
-                                        format!(
-                                            "digest mismatch for {target_file}: expected {expected_sha256}, got {actual_sha}"
-                                        ),
+                                        "invalid expected_sha256 format (must be 64-char hex string)"
+                                            .to_string(),
+                                    )
+                                } else {
+                                    verify_scoped_file_digest(
+                                        &components,
+                                        target_file,
+                                        expected_sha256,
                                     )
                                 }
                             }
-                            Err(_) => (
-                                "verify_digest".to_string(),
-                                false,
-                                format!("target file not found: {target_file}"),
-                            ),
                         }
                     }
                 }

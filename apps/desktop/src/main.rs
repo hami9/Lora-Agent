@@ -256,7 +256,8 @@ fn route_request(
                 "deadline_gating": true,
                 "step_retries_supported": true,
                 "max_step_retries_cap": 10,
-                "non_fatal_steps_supported": true
+                "non_fatal_steps_supported": true,
+                "scoped_path_guard": true
             });
             HttpResponse::json(&status)
         }

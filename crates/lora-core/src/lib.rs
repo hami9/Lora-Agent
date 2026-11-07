@@ -26,11 +26,12 @@ pub use admission::{
 };
 pub use agent::{
     execute_workflow_job, validate_specialist_handoff, validate_structured_proposal,
-    validate_workflow_job, AgentLimits, AgentRunOutcome, BoundedAgentRuntime, CitedEvidence,
-    SpecialistHandoffEnvelope, ToolReceipt, WorkflowExecutionReceipt, WorkflowJobConfig,
-    WorkflowStepKind, WorkflowStepOutcome, WorkflowStepValidation, WorkflowValidationReceipt,
-    DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TOOL_CALLS,
-    DEFAULT_RUN_DEADLINE_SECS,
+    validate_workflow_job, validate_workflow_relative_path, AgentLimits, AgentRunOutcome,
+    BoundedAgentRuntime, CitedEvidence, SpecialistHandoffEnvelope, ToolReceipt,
+    WorkflowExecutionReceipt, WorkflowJobConfig, WorkflowStepKind, WorkflowStepOutcome,
+    WorkflowStepValidation, WorkflowValidationReceipt, DEFAULT_MAX_FILE_BYTES,
+    DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TOOL_CALLS, DEFAULT_RUN_DEADLINE_SECS,
+    MAX_VERIFY_DIGEST_BYTES,
 };
 pub use api_gateway::{
     evaluate_provider_retry_policy, validate_loopback_bind, verify_egress_permit,
