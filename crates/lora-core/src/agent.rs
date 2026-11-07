@@ -1106,6 +1106,21 @@ pub fn verify_workflow_receipt(
             actual: receipt.config_sha256.clone(),
         });
     }
+    verify_receipt_self_integrity(receipt)
+}
+
+/// Verify self-contained cryptographic integrity of a `WorkflowExecutionReceipt` (`lora.workflow.receipt.v1`)
+/// without requiring the external `WorkflowJobConfig` file, ensuring `config_sha256` is a well-formed 64-char
+/// hex SHA-256 digest and `receipt_sha256` matches the canonical digest of all step outcomes and telemetry.
+pub fn verify_receipt_self_integrity(receipt: &WorkflowExecutionReceipt) -> Result<(), LoraError> {
+    if receipt.config_sha256.len() != 64
+        || !receipt.config_sha256.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(LoraError::DigestMismatch {
+            expected: "64-character hex config_sha256".to_string(),
+            actual: receipt.config_sha256.clone(),
+        });
+    }
     let expected_rcpt = compute_workflow_receipt_digest(receipt);
     if !receipt.receipt_sha256.eq_ignore_ascii_case(&expected_rcpt) {
         return Err(LoraError::DigestMismatch {

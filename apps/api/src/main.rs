@@ -15,8 +15,9 @@ use lora_core::{
     EgressPermit, ExecutionMode, ExtensionManifestV1, HeldOutEvaluationReceipt, IdempotencyLedger,
     LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
     SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
-    WorkflowJobConfig, DEFAULT_SAFETY_RESERVE_BYTES,
+    WorkflowExecutionReceipt, WorkflowJobConfig, DEFAULT_SAFETY_RESERVE_BYTES,
 };
+use lora_core::{verify_receipt_self_integrity, verify_workflow_receipt};
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
 };
@@ -1601,6 +1602,135 @@ fn handle_http_connection(
             let report = validate_workflow_job(&config);
             let body = serde_json::to_string(&report).unwrap_or_default();
             write_http_response(stream, "200 OK", "application/json", &body)
+        }
+        ("POST", "/v1/workflow/verify") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+
+            let receipt: WorkflowExecutionReceipt = if let Some(rcpt_val) = req_json.get("receipt")
+            {
+                match serde_json::from_value(rcpt_val.clone()) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let err = serde_json::json!({
+                            "code": "malformed_request",
+                            "detail": format!("invalid workflow receipt: {e}"),
+                        })
+                        .to_string();
+                        return write_http_response(
+                            stream,
+                            "400 Bad Request",
+                            "application/json",
+                            &err,
+                        );
+                    }
+                }
+            } else if let Some(wf_id) = req_json.get("workflow_id").and_then(|v| v.as_str()) {
+                match app.store.find_workflow_receipt(wf_id) {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        let err = serde_json::json!({
+                            "code": "receipt_not_found",
+                            "detail": format!("no workflow execution receipt found for id: {wf_id}"),
+                        })
+                        .to_string();
+                        return write_http_response(
+                            stream,
+                            "404 Not Found",
+                            "application/json",
+                            &err,
+                        );
+                    }
+                    Err(e) => {
+                        let err = serde_json::json!({
+                            "code": e.reason_code(),
+                            "detail": e.redacted_message(),
+                        })
+                        .to_string();
+                        return write_http_response(
+                            stream,
+                            "500 Internal Server Error",
+                            "application/json",
+                            &err,
+                        );
+                    }
+                }
+            } else {
+                let err = serde_json::json!({
+                    "code": "missing_parameter",
+                    "detail": "either 'receipt' or 'workflow_id' is required",
+                })
+                .to_string();
+                return write_http_response(stream, "400 Bad Request", "application/json", &err);
+            };
+
+            let cfg_val = req_json
+                .get("workflow")
+                .or_else(|| req_json.get("config"))
+                .cloned();
+            let (verify_res, mode) = if let Some(c_val) = cfg_val {
+                let config: WorkflowJobConfig = match serde_json::from_value(c_val) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let err = serde_json::json!({
+                            "code": "malformed_request",
+                            "detail": format!("invalid workflow configuration: {e}"),
+                        })
+                        .to_string();
+                        return write_http_response(
+                            stream,
+                            "400 Bad Request",
+                            "application/json",
+                            &err,
+                        );
+                    }
+                };
+                (
+                    verify_workflow_receipt(&config, &receipt),
+                    "full_config_and_receipt",
+                )
+            } else {
+                (
+                    verify_receipt_self_integrity(&receipt),
+                    "receipt_self_integrity",
+                )
+            };
+
+            match verify_res {
+                Ok(()) => {
+                    let body = serde_json::json!({
+                        "verified": true,
+                        "mode": mode,
+                        "workflow_id": receipt.workflow_id,
+                        "config_sha256": receipt.config_sha256,
+                        "receipt_sha256": receipt.receipt_sha256,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
         }
         ("POST", p) if p.starts_with("/v1/workflow/") && p.ends_with("/cancel") => {
             let id = &p["/v1/workflow/".len()..p.len() - "/cancel".len()];

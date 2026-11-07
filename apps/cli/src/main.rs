@@ -6,13 +6,14 @@ use lora_core::{
     compute_workflow_config_digest, default_risk_register_matrix, evaluate_adapter_promotion_gate,
     execute_workflow_job, format_multi_turn_prompt, now_epoch_ms, prepare_leakage_free_splits,
     preview_checked_patch, rollback_applied_patch, validate_catalog_variant,
-    validate_specialist_handoff, validate_workflow_job, AgentLimits, ApprovalDecision,
-    ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit, BrokerVerb,
-    CatalogVariantDescriptor, ChatTurn, CompensatingPatchReceipt, ContextBudgetRequest,
-    ExecutionMode, ExtensionManifestV1, HardwareProbePort, HeldOutEvaluationReceipt,
-    LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
-    SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
-    WorkflowJobConfig, WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
+    validate_specialist_handoff, validate_workflow_job, verify_receipt_self_integrity,
+    verify_workflow_receipt, AgentLimits, ApprovalDecision, ApprovalPromptPort, ApprovalRequest,
+    BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor, ChatTurn,
+    CompensatingPatchReceipt, ContextBudgetRequest, ExecutionMode, ExtensionManifestV1,
+    HardwareProbePort, HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig,
+    PatchProposal, PrivilegedBrokerGate, SpecialistHandoffEnvelope, TrainingExample,
+    TuningCacheKey, TuningProfile, TuningTrialSample, WorkflowJobConfig, WorkflowStepKind,
+    DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -442,6 +443,9 @@ enum Commands {
         /// Optional expected 64-char hex SHA-256 digest of the canonical workflow config
         #[arg(long)]
         expected_config_sha256: Option<String>,
+        /// Verify cryptographic SHA-256 attestation of a recorded workflow receipt by workflow ID
+        #[arg(long)]
+        verify_receipt: Option<String>,
     },
 }
 
@@ -1431,7 +1435,37 @@ fn main() {
             max_step_retries,
             non_fatal_steps,
             expected_config_sha256,
+            verify_receipt,
         } => {
+            if let Some(ref wf_id) = verify_receipt {
+                let stored = app.store.find_workflow_receipt(wf_id)?.ok_or_else(|| {
+                    LoraError::PolicyDenied(format!(
+                        "no workflow execution receipt found for id '{wf_id}'"
+                    ))
+                })?;
+                if let Some(ref path) = config {
+                    let raw = std::fs::read_to_string(path)?;
+                    let cfg: WorkflowJobConfig = serde_json::from_str(&raw)
+                        .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
+                    verify_workflow_receipt(&cfg, &stored)?;
+                } else {
+                    verify_receipt_self_integrity(&stored)?;
+                    if let Some(ref expected_sha) = expected_config_sha256 {
+                        if !stored.config_sha256.eq_ignore_ascii_case(expected_sha) {
+                            return Err(LoraError::DigestMismatch {
+                                expected: expected_sha.clone(),
+                                actual: stored.config_sha256.clone(),
+                            });
+                        }
+                    }
+                }
+                println!("=== Workflow Receipt Verification ===");
+                println!("Workflow ID     : {}", stored.workflow_id);
+                println!("Config SHA-256  : {}", stored.config_sha256);
+                println!("Receipt SHA-256 : {}", stored.receipt_sha256);
+                println!("Status          : VERIFIED (SHA-256 chain intact)");
+                return Ok(());
+            }
             if let Some(keep) = prune_keep {
                 let deleted = app.store.prune_workflow_receipts(keep)?;
                 println!(

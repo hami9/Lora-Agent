@@ -27,10 +27,10 @@ pub use admission::{
 pub use agent::{
     compute_workflow_config_digest, compute_workflow_receipt_digest, execute_workflow_job,
     validate_specialist_handoff, validate_structured_proposal, validate_workflow_job,
-    validate_workflow_relative_path, verify_workflow_receipt, AgentLimits, AgentRunOutcome,
-    BoundedAgentRuntime, CitedEvidence, SpecialistHandoffEnvelope, ToolReceipt,
-    WorkflowExecutionReceipt, WorkflowJobConfig, WorkflowStepKind, WorkflowStepOutcome,
-    WorkflowStepValidation, WorkflowValidationReceipt, DEFAULT_MAX_FILE_BYTES,
+    validate_workflow_relative_path, verify_receipt_self_integrity, verify_workflow_receipt,
+    AgentLimits, AgentRunOutcome, BoundedAgentRuntime, CitedEvidence, SpecialistHandoffEnvelope,
+    ToolReceipt, WorkflowExecutionReceipt, WorkflowJobConfig, WorkflowStepKind,
+    WorkflowStepOutcome, WorkflowStepValidation, WorkflowValidationReceipt, DEFAULT_MAX_FILE_BYTES,
     DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TOOL_CALLS, DEFAULT_RUN_DEADLINE_SECS,
     MAX_VERIFY_DIGEST_BYTES,
 };

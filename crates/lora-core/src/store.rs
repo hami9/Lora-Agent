@@ -851,6 +851,26 @@ impl SqliteStore {
         )?;
         Ok(deleted)
     }
+
+    /// Audit cryptographic attestation integrity across recent persisted workflow receipts.
+    /// Returns `(total_attested_checked, verified_ok_count)`.
+    pub fn verify_stored_workflow_receipts(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<(usize, usize), LoraError> {
+        let receipts = self.list_workflow_receipts(limit)?;
+        let mut checked = 0usize;
+        let mut valid = 0usize;
+        for rcpt in &receipts {
+            if !rcpt.receipt_sha256.is_empty() {
+                checked += 1;
+                if crate::agent::verify_receipt_self_integrity(rcpt).is_ok() {
+                    valid += 1;
+                }
+            }
+        }
+        Ok((checked, valid))
+    }
 }
 
 /// Compute a keyed correlation digest over a sensitive short string using a per-install salt (`docs/SECURITY_ARCHITECTURE.md`).

@@ -258,10 +258,23 @@ fn route_request(
                 "max_step_retries_cap": 10,
                 "non_fatal_steps_supported": true,
                 "scoped_path_guard": true,
-                "receipt_attestation": true
+                "receipt_attestation": true,
+                "receipt_self_verification": true
             });
             HttpResponse::json(&status)
         }
+        "/api/workflow-verify" => match app.store.verify_stored_workflow_receipts(Some(20)) {
+            Ok((checked, valid)) => HttpResponse::json(&serde_json::json!({
+                "status": if checked == valid { "verified" } else { "tampered" },
+                "attested_receipts_checked": checked,
+                "attested_receipts_valid": valid,
+                "chain_intact": checked == valid
+            })),
+            Err(e) => HttpResponse::error(
+                "500 Internal Server Error",
+                &format!("{:?}", e.reason_code()),
+            ),
+        },
         "/api/workflow-receipts" => match app.store.list_workflow_receipts(Some(20)) {
             Ok(receipts) => HttpResponse::json(&serde_json::json!({
                 "count": receipts.len(),

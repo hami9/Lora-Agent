@@ -39,6 +39,7 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(openapi_str.contains("\"/v1/agent/handoff\""));
     assert!(openapi_str.contains("\"/v1/workflow/run\""));
     assert!(openapi_str.contains("\"/v1/workflow/{id}/cancel\""));
+    assert!(openapi_str.contains("\"/v1/workflow/verify\""));
 
     // 2. Spawn live `lora-api --once` on loopback port and send authenticated GET /v1/capabilities
     let bind_addr = find_free_loopback_addr();
@@ -146,7 +147,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "56",
+            "58",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -965,6 +966,39 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r56.starts_with("HTTP/1.1 200 OK"));
     assert!(r56.contains("\"valid\":true"));
     assert!(r56.contains("\"total_steps\":4"));
+    assert!(r56.contains("\"config_sha256\":"));
+
+    // (bb) POST /v1/workflow/verify verifies persisted workflow receipt attestation
+    let body_verify_ok = serde_json::json!({
+        "workflow_id": "wf-test-01"
+    })
+    .to_string();
+    let r57 = send_http(&format!(
+        "POST /v1/workflow/verify HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_verify_ok}",
+        body_verify_ok.len()
+    ));
+    assert!(r57.starts_with("HTTP/1.1 200 OK"));
+    assert!(r57.contains("\"verified\":true"));
+    assert!(r57.contains("\"mode\":\"receipt_self_integrity\""));
+    assert!(r57.contains("\"workflow_id\":\"wf-test-01\""));
+
+    // (bc) POST /v1/workflow/verify fails closed when config does not match persisted receipt
+    let body_verify_bad = serde_json::json!({
+        "workflow_id": "wf-test-01",
+        "workflow": {
+            "workflow_id": "wf-test-01",
+            "title": "Tampered Title",
+            "steps": [],
+            "stop_on_failure": true
+        }
+    })
+    .to_string();
+    let r58 = send_http(&format!(
+        "POST /v1/workflow/verify HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_verify_bad}",
+        body_verify_bad.len()
+    ));
+    assert!(r58.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(r58.contains("digest_mismatch"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());

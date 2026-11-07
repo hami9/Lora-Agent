@@ -475,6 +475,22 @@
           }
         }
       }
+    },
+    "/v1/workflow/verify": {
+      "post": {
+        "summary": "Verify cryptographic SHA-256 attestation integrity of a workflow execution receipt against its canonical config or self-contained receipt chain",
+        "responses": {
+          "200": {
+            "description": "Receipt attestation verified (config_sha256 and receipt_sha256 match canonical digests)"
+          },
+          "400": {
+            "description": "Digest mismatch or malformed request"
+          },
+          "404": {
+            "description": "Referenced workflow_id receipt not found"
+          }
+        }
+      }
     }
   }
 }

@@ -2535,4 +2535,54 @@ fn workflow_pipeline_execution_and_step_accounting() {
         lora_core::verify_workflow_receipt(&altered_job, &nf_receipt),
         Err(lora_core::LoraError::DigestMismatch { .. })
     ));
+
+    // Self-contained receipt verification & store audit (v0.2.11)
+    lora_core::verify_receipt_self_integrity(&nf_receipt)
+        .expect("self-integrity verification succeeds");
+    assert!(matches!(
+        lora_core::verify_receipt_self_integrity(&tampered_receipt),
+        Err(lora_core::LoraError::DigestMismatch { .. })
+    ));
+
+    store
+        .record_workflow_receipt(&nf_receipt)
+        .expect("record nf_receipt");
+    let (checked, valid) = store
+        .verify_stored_workflow_receipts(Some(20))
+        .expect("verify stored receipts");
+    assert!(checked >= 1);
+    assert_eq!(checked, valid);
+
+    let nf_cfg_path = tmp.path().join("nf_job.json");
+    std::fs::write(
+        &nf_cfg_path,
+        serde_json::to_string_pretty(&non_fatal_job).unwrap(),
+    )
+    .expect("write nf_job.json");
+    let out_run_nf = std::process::Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "workflow",
+            "--config",
+            nf_cfg_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run lora workflow --config nf_job.json");
+    assert!(out_run_nf.status.success());
+
+    let out_verify_cli = std::process::Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "workflow",
+            "--verify-receipt",
+            "wf-non-fatal-demo",
+        ])
+        .output()
+        .expect("run lora workflow --verify-receipt wf-non-fatal-demo");
+    assert!(out_verify_cli.status.success());
+    let stdout_verify_cli = String::from_utf8_lossy(&out_verify_cli.stdout);
+    assert!(stdout_verify_cli.contains("Workflow Receipt Verification"));
+    assert!(stdout_verify_cli.contains("VERIFIED (SHA-256 chain intact)"));
 }
