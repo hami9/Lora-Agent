@@ -260,7 +260,8 @@ fn route_request(
                 "scoped_path_guard": true,
                 "receipt_attestation": true,
                 "receipt_self_verification": true,
-                "bundle_export_supported": true
+                "bundle_export_supported": true,
+                "cancellation_token_supported": true
             });
             HttpResponse::json(&status)
         }

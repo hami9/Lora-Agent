@@ -27,8 +27,8 @@ pub use admission::{
 pub use agent::{
     build_workflow_attestation_bundle, compute_workflow_bundle_digest,
     compute_workflow_config_digest, compute_workflow_receipt_digest, execute_workflow_job,
-    validate_specialist_handoff, validate_structured_proposal, validate_workflow_job,
-    validate_workflow_relative_path, verify_receipt_self_integrity,
+    execute_workflow_job_cancellable, validate_specialist_handoff, validate_structured_proposal,
+    validate_workflow_job, validate_workflow_relative_path, verify_receipt_self_integrity,
     verify_workflow_attestation_bundle, verify_workflow_receipt, AgentLimits, AgentRunOutcome,
     BoundedAgentRuntime, CitedEvidence, SpecialistHandoffEnvelope, ToolReceipt,
     WorkflowAttestationBundle, WorkflowExecutionReceipt, WorkflowJobConfig, WorkflowStepKind,

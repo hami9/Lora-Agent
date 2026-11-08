@@ -947,6 +947,8 @@ pub struct WorkflowExecutionReceipt {
     #[serde(default)]
     pub deadline_exceeded: bool,
     #[serde(default)]
+    pub cancelled: bool,
+    #[serde(default)]
     pub config_sha256: String,
     #[serde(default)]
     pub receipt_sha256: String,
@@ -1079,6 +1081,7 @@ pub fn compute_workflow_receipt_digest(receipt: &WorkflowExecutionReceipt) -> St
     hasher.update(receipt.created_at_ms.to_le_bytes());
     hasher.update(receipt.total_duration_ms.to_le_bytes());
     hasher.update([u8::from(receipt.deadline_exceeded)]);
+    hasher.update([u8::from(receipt.cancelled)]);
     hasher.update((receipt.step_outcomes.len() as u64).to_le_bytes());
     for out in &receipt.step_outcomes {
         hasher.update((out.step_index as u64).to_le_bytes());
@@ -1628,6 +1631,14 @@ pub fn validate_workflow_job(config: &WorkflowJobConfig) -> WorkflowValidationRe
 pub fn execute_workflow_job(
     config: &WorkflowJobConfig,
 ) -> Result<WorkflowExecutionReceipt, LoraError> {
+    execute_workflow_job_cancellable(config, None)
+}
+
+/// Execute a multi-step workflow pipeline with optional cancellation flag monitoring (`docs/AGENT_RUNTIME.md`).
+pub fn execute_workflow_job_cancellable(
+    config: &WorkflowJobConfig,
+    cancel_flag: Option<&Arc<AtomicBool>>,
+) -> Result<WorkflowExecutionReceipt, LoraError> {
     if config.workflow_id.trim().is_empty() {
         return Err(LoraError::PolicyDenied(
             "workflow requires a non-empty workflow_id".to_string(),
@@ -1665,8 +1676,27 @@ pub fn execute_workflow_job(
     let mut outcomes = Vec::new();
     let mut all_success = true;
     let mut deadline_exceeded = false;
+    let mut is_cancelled = false;
 
     for (idx, step) in config.steps.iter().enumerate() {
+        if let Some(flag) = cancel_flag {
+            if flag.load(Ordering::SeqCst) {
+                all_success = false;
+                is_cancelled = true;
+                outcomes.push(WorkflowStepOutcome {
+                    step_index: idx,
+                    step_kind: "cancelled".to_string(),
+                    success: false,
+                    detail: format!("execution cancelled by user before step {}", idx + 1),
+                    started_at_ms: crate::store::now_epoch_ms(),
+                    duration_ms: 0,
+                    attempts: 0,
+                    non_fatal: false,
+                });
+                break;
+            }
+        }
+
         let is_non_fatal = config
             .non_fatal_step_indices
             .as_ref()
@@ -1705,6 +1735,16 @@ pub fn execute_workflow_job(
         let mut final_detail = String::new();
 
         while attempts <= retries_allowed {
+            if let Some(flag) = cancel_flag {
+                if flag.load(Ordering::SeqCst) {
+                    all_success = false;
+                    is_cancelled = true;
+                    final_kind = "cancelled".to_string();
+                    final_success = false;
+                    final_detail = format!("execution cancelled during step {} attempts", idx + 1);
+                    break;
+                }
+            }
             attempts += 1;
             let (kind_name, success, detail) = match step {
                 WorkflowStepKind::DoctorProbe {
@@ -1866,6 +1906,13 @@ pub fn execute_workflow_job(
             }
 
             if attempts <= retries_allowed {
+                if let Some(flag) = cancel_flag {
+                    if flag.load(Ordering::SeqCst) {
+                        is_cancelled = true;
+                        all_success = false;
+                        break;
+                    }
+                }
                 if let Some(max_ms) = config.max_duration_ms {
                     let elapsed = crate::store::now_epoch_ms().saturating_sub(job_start);
                     if elapsed >= max_ms {
@@ -1873,6 +1920,20 @@ pub fn execute_workflow_job(
                     }
                 }
             }
+        }
+
+        if is_cancelled {
+            outcomes.push(WorkflowStepOutcome {
+                step_index: idx,
+                step_kind: final_kind,
+                success: false,
+                detail: final_detail,
+                started_at_ms: step_start,
+                duration_ms: crate::store::now_epoch_ms().saturating_sub(step_start),
+                attempts,
+                non_fatal: false,
+            });
+            break;
         }
 
         let step_duration = crate::store::now_epoch_ms().saturating_sub(step_start);
@@ -1908,6 +1969,26 @@ pub fn execute_workflow_job(
 
         if !final_success && config.stop_on_failure && !is_non_fatal {
             break;
+        }
+
+        if let Some(flag) = cancel_flag {
+            if flag.load(Ordering::SeqCst) {
+                is_cancelled = true;
+                all_success = false;
+                if idx + 1 < config.steps.len() {
+                    outcomes.push(WorkflowStepOutcome {
+                        step_index: idx + 1,
+                        step_kind: "cancelled".to_string(),
+                        success: false,
+                        detail: format!("execution cancelled after step {}", idx + 1),
+                        started_at_ms: crate::store::now_epoch_ms(),
+                        duration_ms: 0,
+                        attempts: 0,
+                        non_fatal: false,
+                    });
+                }
+                break;
+            }
         }
 
         if let Some(max_ms) = config.max_duration_ms {
@@ -1954,6 +2035,7 @@ pub fn execute_workflow_job(
         created_at_ms: job_start,
         total_duration_ms,
         deadline_exceeded,
+        cancelled: is_cancelled,
         config_sha256: compute_workflow_config_digest(config),
         receipt_sha256: String::new(),
     };

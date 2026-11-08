@@ -2171,6 +2171,7 @@ fn workflow_pipeline_execution_and_step_accounting() {
     assert_eq!(parsed_legacy.step_outcomes[0].duration_ms, 0);
     assert_eq!(parsed_legacy.step_outcomes[0].attempts, 1);
     assert!(!parsed_legacy.step_outcomes[0].non_fatal);
+    assert!(!parsed_legacy.cancelled);
 
     // Verify persistent storage and retrieval in SqliteStore
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -2624,4 +2625,19 @@ fn workflow_pipeline_execution_and_step_accounting() {
         lora_core::verify_workflow_attestation_bundle(&bundle_obj),
         Err(lora_core::LoraError::DigestMismatch { .. })
     ));
+
+    // Verify cooperative cancellation in workflow pipelines (v0.2.13)
+    let cancel_pre = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let cancelled_receipt =
+        lora_core::execute_workflow_job_cancellable(&non_fatal_job, Some(&cancel_pre))
+            .expect("cancellable workflow execution returns valid receipt");
+    assert!(!cancelled_receipt.successful);
+    assert!(cancelled_receipt.cancelled);
+    assert_eq!(cancelled_receipt.step_outcomes.len(), 1);
+    assert_eq!(cancelled_receipt.step_outcomes[0].step_kind, "cancelled");
+    assert!(cancelled_receipt.step_outcomes[0]
+        .detail
+        .contains("cancelled by user before step 1"));
+    lora_core::verify_receipt_self_integrity(&cancelled_receipt)
+        .expect("cancelled receipt passes cryptographic self-integrity attestation");
 }

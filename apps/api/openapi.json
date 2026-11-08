@@ -406,7 +406,7 @@
         "summary": "Execute multi-phase workflow pipeline with optional deadline timeout gating (max_duration_ms), transient failure retries (max_step_retries), non-fatal steps, and cryptographic verify_digest steps",
         "responses": {
           "200": {
-            "description": "WorkflowExecutionReceipt detailing step outcomes with attempt counts, non-fatal flags, latency telemetry, deadline enforcement state (deadline_exceeded), cryptographic config_sha256/receipt_sha256 digests, and pipeline status"
+            "description": "WorkflowExecutionReceipt detailing step outcomes with attempt counts, non-fatal flags, latency telemetry, deadline enforcement state (deadline_exceeded), cooperative cancellation state (cancelled), cryptographic config_sha256/receipt_sha256 digests, and pipeline status"
           },
           "400": {
             "description": "Malformed workflow specification or policy denial"

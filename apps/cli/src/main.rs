@@ -4,12 +4,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 use lora_core::{
     allocate_context_budget, apply_approved_patch, classify_artifact_compatibility,
     compute_workflow_config_digest, default_risk_register_matrix, evaluate_adapter_promotion_gate,
-    execute_workflow_job, format_multi_turn_prompt, now_epoch_ms, prepare_leakage_free_splits,
-    preview_checked_patch, rollback_applied_patch, validate_catalog_variant,
-    validate_specialist_handoff, validate_workflow_job, verify_receipt_self_integrity,
-    verify_workflow_attestation_bundle, verify_workflow_receipt, AgentLimits, ApprovalDecision,
-    ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit, BrokerVerb,
-    CatalogVariantDescriptor, ChatTurn, CompensatingPatchReceipt, ContextBudgetRequest,
+    execute_workflow_job_cancellable, format_multi_turn_prompt, now_epoch_ms,
+    prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
+    validate_catalog_variant, validate_specialist_handoff, validate_workflow_job,
+    verify_receipt_self_integrity, verify_workflow_attestation_bundle, verify_workflow_receipt,
+    AgentLimits, ApprovalDecision, ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit,
+    BrokerVerb, CatalogVariantDescriptor, ChatTurn, CompensatingPatchReceipt, ContextBudgetRequest,
     ExecutionMode, ExtensionManifestV1, HardwareProbePort, HeldOutEvaluationReceipt,
     LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
     SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
@@ -1513,7 +1513,9 @@ fn main() {
                 } else {
                     println!("=== Recorded Workflow Receipts ({}) ===", receipts.len());
                     for (i, r) in receipts.iter().enumerate() {
-                        let dl_tag = if r.deadline_exceeded {
+                        let dl_tag = if r.cancelled {
+                            " [CANCELLED]"
+                        } else if r.deadline_exceeded {
                             " [EXCEEDED]"
                         } else {
                             ""
@@ -1630,7 +1632,7 @@ fn main() {
                 return Ok(());
             }
 
-            let receipt = execute_workflow_job(&job_config)?;
+            let receipt = execute_workflow_job_cancellable(&job_config, Some(&cancel_flag))?;
             let _ = app.store.record_workflow_receipt(&receipt);
             println!("=== Workflow Execution Receipt ===");
             println!("Workflow ID     : {}", receipt.workflow_id);
@@ -1640,7 +1642,9 @@ fn main() {
             println!("Completed Steps : {}", receipt.completed_steps);
             println!("Successful      : {}", receipt.successful);
             println!("Total Duration  : {}ms", receipt.total_duration_ms);
-            if receipt.deadline_exceeded {
+            if receipt.cancelled {
+                println!("Execution State : CANCELLED");
+            } else if receipt.deadline_exceeded {
                 println!("Deadline State  : EXCEEDED");
             } else if job_config.max_duration_ms.is_some() {
                 println!("Deadline State  : SATISFIED");
