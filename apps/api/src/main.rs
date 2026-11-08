@@ -18,8 +18,8 @@ use lora_core::{
     WorkflowExecutionReceipt, WorkflowJobConfig, DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_core::{
-    verify_receipt_self_integrity, verify_workflow_attestation_bundle, verify_workflow_receipt,
-    WorkflowAttestationBundle,
+    compute_patch_receipt_digest, verify_compensating_patch_receipt, verify_receipt_self_integrity,
+    verify_workflow_attestation_bundle, verify_workflow_receipt, WorkflowAttestationBundle,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -2337,6 +2337,14 @@ fn handle_http_connection(
                         );
                     }
                 };
+            if let Err(e) = verify_compensating_patch_receipt(&rcpt) {
+                let err = serde_json::json!({
+                    "code": e.reason_code(),
+                    "detail": e.redacted_message(),
+                })
+                .to_string();
+                return write_http_response(stream, "400 Bad Request", "application/json", &err);
+            }
             let scope_path = PathBuf::from(scope_str);
             let root = match app.file_executor.register_root(&scope_path) {
                 Ok(r) => r,
@@ -2356,10 +2364,12 @@ fn handle_http_connection(
             };
             match rollback_applied_patch(&root, &rcpt) {
                 Ok(()) => {
+                    let receipt_digest = compute_patch_receipt_digest(&rcpt);
                     let body = serde_json::json!({
                         "status": "rolled_back",
                         "relative_path": rcpt.relative_path,
                         "restored_sha256": rcpt.before_sha256,
+                        "attestation_digest": receipt_digest,
                     })
                     .to_string();
                     write_http_response(stream, "200 OK", "application/json", &body)

@@ -261,7 +261,8 @@ fn route_request(
                 "receipt_attestation": true,
                 "receipt_self_verification": true,
                 "bundle_export_supported": true,
-                "cancellation_token_supported": true
+                "cancellation_token_supported": true,
+                "patch_rollback_attestation": true
             });
             HttpResponse::json(&status)
         }

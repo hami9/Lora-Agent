@@ -3,13 +3,14 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use lora_core::{
     allocate_context_budget, apply_approved_patch, classify_artifact_compatibility,
-    compute_workflow_config_digest, default_risk_register_matrix, evaluate_adapter_promotion_gate,
-    execute_workflow_job_cancellable, format_multi_turn_prompt, now_epoch_ms,
-    prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
+    compute_patch_receipt_digest, compute_workflow_config_digest, default_risk_register_matrix,
+    evaluate_adapter_promotion_gate, execute_workflow_job_cancellable, format_multi_turn_prompt,
+    now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
     validate_catalog_variant, validate_specialist_handoff, validate_workflow_job,
-    verify_receipt_self_integrity, verify_workflow_attestation_bundle, verify_workflow_receipt,
-    AgentLimits, ApprovalDecision, ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit,
-    BrokerVerb, CatalogVariantDescriptor, ChatTurn, CompensatingPatchReceipt, ContextBudgetRequest,
+    verify_compensating_patch_receipt, verify_receipt_self_integrity,
+    verify_workflow_attestation_bundle, verify_workflow_receipt, AgentLimits, ApprovalDecision,
+    ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit, BrokerVerb,
+    CatalogVariantDescriptor, ChatTurn, CompensatingPatchReceipt, ContextBudgetRequest,
     ExecutionMode, ExtensionManifestV1, HardwareProbePort, HeldOutEvaluationReceipt,
     LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
     SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
@@ -1126,9 +1127,10 @@ fn main() {
             println!("Approval Digest : {}", preview.approval_digest);
             if apply {
                 let receipt = apply_approved_patch(&root, &proposal, &preview.approval_digest)?;
+                let receipt_digest = compute_patch_receipt_digest(&receipt);
                 println!(
-                    "Patch applied atomically to {} (new sha256={}).",
-                    receipt.relative_path, receipt.after_sha256
+                    "Patch applied atomically to {} (new sha256={}, receipt_digest={}).",
+                    receipt.relative_path, receipt.after_sha256, receipt_digest
                 );
                 if let Some(out_path) = receipt_out {
                     let json = serde_json::to_string_pretty(&receipt)
@@ -1144,10 +1146,12 @@ fn main() {
             let raw = std::fs::read_to_string(&receipt)?;
             let rcpt: CompensatingPatchReceipt = serde_json::from_str(&raw)
                 .map_err(|e| LoraError::Io(format!("malformed receipt JSON: {e}")))?;
+            verify_compensating_patch_receipt(&rcpt)?;
+            let receipt_digest = compute_patch_receipt_digest(&rcpt);
             rollback_applied_patch(&root, &rcpt)?;
             println!(
-                "Successfully rolled back patch on {} (restored to sha256={}).",
-                rcpt.relative_path, rcpt.before_sha256
+                "Successfully rolled back patch on {} (restored to sha256={}, receipt_digest={}).",
+                rcpt.relative_path, rcpt.before_sha256, receipt_digest
             );
             Ok(())
         }

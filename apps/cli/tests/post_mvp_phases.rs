@@ -2641,3 +2641,126 @@ fn workflow_pipeline_execution_and_step_accounting() {
     lora_core::verify_receipt_self_integrity(&cancelled_receipt)
         .expect("cancelled receipt passes cryptographic self-integrity attestation");
 }
+
+/// `v0.2.14`: Hardened patch tool containment and compensating rollback receipt attestation verification.
+#[test]
+fn test_patch_containment_and_rollback_receipt_attestation() {
+    use std::fs;
+    use std::process::Command;
+
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().expect("tempdir");
+    let ws = tmp.path().join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    let file_path = ws.join("config.toml");
+    fs::write(&file_path, "port = 8080\nenv = \"prod\"\n").unwrap();
+
+    let initial_bytes = fs::read(&file_path).unwrap();
+    let initial_sha = format!(
+        "{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(&initial_bytes)
+    );
+    let receipt_path = tmp.path().join("rollback_receipt.json");
+
+    // 1. Rejects path escape attempts (reserved Windows device name, traversal, secret file)
+    let bad_proposal = Command::new(lora_bin)
+        .args([
+            "patch",
+            "--scope",
+            ws.to_str().unwrap(),
+            "--file",
+            "CON",
+            "--expected-sha256",
+            &initial_sha,
+            "--old-snippet",
+            "port = 8080",
+            "--new-snippet",
+            "port = 9090",
+        ])
+        .output()
+        .unwrap();
+    assert!(!bad_proposal.status.success());
+    let bad_err = String::from_utf8_lossy(&bad_proposal.stderr);
+    assert!(bad_err.contains("scope escape in path") || bad_err.contains("invalid relative path"));
+
+    // 2. Normal patch application succeeds and saves attested receipt
+    let patch_out = Command::new(lora_bin)
+        .args([
+            "patch",
+            "--scope",
+            ws.to_str().unwrap(),
+            "--file",
+            "config.toml",
+            "--expected-sha256",
+            &initial_sha,
+            "--old-snippet",
+            "port = 8080",
+            "--new-snippet",
+            "port = 9090",
+            "--apply",
+            "--receipt-out",
+            receipt_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        patch_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&patch_out.stderr)
+    );
+    let stdout_patch = String::from_utf8_lossy(&patch_out.stdout);
+    assert!(stdout_patch.contains("receipt_digest="));
+
+    let receipt_content = fs::read_to_string(&receipt_path).unwrap();
+    let receipt: lora_core::CompensatingPatchReceipt =
+        serde_json::from_str(&receipt_content).unwrap();
+    assert!(receipt.receipt_sha256.is_some());
+    lora_core::verify_compensating_patch_receipt(&receipt).expect("receipt verification succeeds");
+
+    // 3. Tampering with before_bytes fails closed on rollback
+    let mut tampered_rcpt = receipt.clone();
+    tampered_rcpt.before_bytes = b"corrupted bytes".to_vec();
+    let tampered_path = tmp.path().join("tampered_receipt.json");
+    fs::write(
+        &tampered_path,
+        serde_json::to_string(&tampered_rcpt).unwrap(),
+    )
+    .unwrap();
+
+    let tampered_out = Command::new(lora_bin)
+        .args([
+            "rollback",
+            "--scope",
+            ws.to_str().unwrap(),
+            "--receipt",
+            tampered_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!tampered_out.status.success());
+    let tampered_err = String::from_utf8_lossy(&tampered_out.stderr);
+    assert!(tampered_err.contains("DigestMismatch") || tampered_err.contains("digest mismatch"));
+
+    // 4. Genuine receipt rollback succeeds
+    let rollback_out = Command::new(lora_bin)
+        .args([
+            "rollback",
+            "--scope",
+            ws.to_str().unwrap(),
+            "--receipt",
+            receipt_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        rollback_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rollback_out.stderr)
+    );
+    let stdout_rb = String::from_utf8_lossy(&rollback_out.stdout);
+    assert!(stdout_rb.contains("Successfully rolled back patch"));
+    assert_eq!(
+        fs::read_to_string(&file_path).unwrap(),
+        "port = 8080\nenv = \"prod\"\n"
+    );
+}

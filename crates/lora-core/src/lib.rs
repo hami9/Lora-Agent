@@ -63,7 +63,8 @@ pub use memory::{
     IngestionReceipt, RetrievedEvidence,
 };
 pub use patch_tool::{
-    apply_approved_patch, preview_checked_patch, rollback_applied_patch, CompensatingPatchReceipt,
+    apply_approved_patch, compute_patch_receipt_digest, preview_checked_patch,
+    rollback_applied_patch, verify_compensating_patch_receipt, CompensatingPatchReceipt,
     PatchPreview, PatchProposal,
 };
 pub use plugins::{
