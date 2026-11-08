@@ -2585,4 +2585,43 @@ fn workflow_pipeline_execution_and_step_accounting() {
     let stdout_verify_cli = String::from_utf8_lossy(&out_verify_cli.stdout);
     assert!(stdout_verify_cli.contains("Workflow Receipt Verification"));
     assert!(stdout_verify_cli.contains("VERIFIED (SHA-256 chain intact)"));
+
+    // Export and verify portable WorkflowAttestationBundle (v0.2.12)
+    let bundle_path = tmp.path().join("wf_bundle.json");
+    let out_export_bundle = std::process::Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "workflow",
+            "--export-bundle",
+            bundle_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run lora workflow --export-bundle");
+    assert!(out_export_bundle.status.success());
+    let stdout_export = String::from_utf8_lossy(&out_export_bundle.stdout);
+    assert!(stdout_export.contains("Workflow Attestation Bundle Exported"));
+
+    let out_verify_bundle = std::process::Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "workflow",
+            "--verify-bundle",
+            bundle_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run lora workflow --verify-bundle");
+    assert!(out_verify_bundle.status.success());
+    let stdout_verify_b = String::from_utf8_lossy(&out_verify_bundle.stdout);
+    assert!(stdout_verify_b.contains("VERIFIED (bundle & all receipt SHA-256 chains intact)"));
+
+    let mut bundle_obj: lora_core::WorkflowAttestationBundle =
+        serde_json::from_str(&std::fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    lora_core::verify_workflow_attestation_bundle(&bundle_obj).expect("verify bundle");
+    bundle_obj.total_receipts += 1;
+    assert!(matches!(
+        lora_core::verify_workflow_attestation_bundle(&bundle_obj),
+        Err(lora_core::LoraError::DigestMismatch { .. })
+    ));
 }

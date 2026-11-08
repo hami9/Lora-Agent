@@ -438,7 +438,11 @@
         if (w.receipt_attestation) {
           const attEl = document.getElementById('wf-attestation');
           if (attEl) {
-            attEl.textContent = w.receipt_self_verification ? 'SHA-256 Verified' : 'SHA-256 Bound';
+            attEl.textContent = w.bundle_export_supported
+              ? 'SHA-256 Verified (Bundle v1)'
+              : w.receipt_self_verification
+              ? 'SHA-256 Verified'
+              : 'SHA-256 Bound';
           }
         }
         document.getElementById('workflow-live').hidden = false;

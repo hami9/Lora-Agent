@@ -17,7 +17,10 @@ use lora_core::{
     SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
     WorkflowExecutionReceipt, WorkflowJobConfig, DEFAULT_SAFETY_RESERVE_BYTES,
 };
-use lora_core::{verify_receipt_self_integrity, verify_workflow_receipt};
+use lora_core::{
+    verify_receipt_self_integrity, verify_workflow_attestation_bundle, verify_workflow_receipt,
+    WorkflowAttestationBundle,
+};
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
 };
@@ -1718,6 +1721,85 @@ fn handle_http_connection(
                         "workflow_id": receipt.workflow_id,
                         "config_sha256": receipt.config_sha256,
                         "receipt_sha256": receipt.receipt_sha256,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("GET", "/v1/workflow/bundle") => {
+            match app.store.export_workflow_attestation_bundle(Some(50)) {
+                Ok(bundle) => {
+                    let body = serde_json::to_string(&bundle).unwrap_or_default();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    )
+                }
+            }
+        }
+        ("POST", "/v1/workflow/bundle/verify") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let bundle_val = req_json
+                .get("bundle")
+                .cloned()
+                .unwrap_or_else(|| req_json.clone());
+            let bundle: WorkflowAttestationBundle = match serde_json::from_value(bundle_val) {
+                Ok(b) => b,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid workflow attestation bundle: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            match verify_workflow_attestation_bundle(&bundle) {
+                Ok(()) => {
+                    let body = serde_json::json!({
+                        "verified": true,
+                        "schema_version": bundle.schema_version,
+                        "total_receipts": bundle.total_receipts,
+                        "bundle_sha256": bundle.bundle_sha256,
                     })
                     .to_string();
                     write_http_response(stream, "200 OK", "application/json", &body)

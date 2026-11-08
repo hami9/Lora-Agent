@@ -871,6 +871,15 @@ impl SqliteStore {
         }
         Ok((checked, valid))
     }
+
+    /// Export a cryptographically bound `WorkflowAttestationBundle` over recent workflow receipts.
+    pub fn export_workflow_attestation_bundle(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<crate::agent::WorkflowAttestationBundle, LoraError> {
+        let receipts = self.list_workflow_receipts(limit)?;
+        Ok(crate::agent::build_workflow_attestation_bundle(receipts))
+    }
 }
 
 /// Compute a keyed correlation digest over a sensitive short string using a per-install salt (`docs/SECURITY_ARCHITECTURE.md`).

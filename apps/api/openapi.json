@@ -491,6 +491,29 @@
           }
         }
       }
+    },
+    "/v1/workflow/bundle": {
+      "get": {
+        "summary": "Export a portable, cryptographically bound WorkflowAttestationBundle (lora.workflow.bundle.v1) over recent workflow execution receipts",
+        "responses": {
+          "200": {
+            "description": "WorkflowAttestationBundle JSON with bundle_sha256 and verified receipt list"
+          }
+        }
+      }
+    },
+    "/v1/workflow/bundle/verify": {
+      "post": {
+        "summary": "Verify cryptographic integrity of a WorkflowAttestationBundle and every receipt inside it",
+        "responses": {
+          "200": {
+            "description": "Bundle and all contained receipts verified"
+          },
+          "400": {
+            "description": "Bundle digest mismatch, tampered receipt, or malformed payload"
+          }
+        }
+      }
     }
   }
 }

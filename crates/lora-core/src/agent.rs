@@ -1131,6 +1131,98 @@ pub fn verify_receipt_self_integrity(receipt: &WorkflowExecutionReceipt) -> Resu
     Ok(())
 }
 
+/// Cryptographically bound portable bundle of workflow execution receipts (`lora.workflow.bundle.v1`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowAttestationBundle {
+    pub schema_version: u32,
+    pub exported_at_ms: u64,
+    pub total_receipts: usize,
+    pub all_receipts_verified: bool,
+    pub receipts: Vec<WorkflowExecutionReceipt>,
+    pub bundle_sha256: String,
+}
+
+/// Compute a deterministic, domain-separated SHA-256 digest (`lora.workflow.bundle.v1`)
+/// over a `WorkflowAttestationBundle` header and its ordered receipt digests.
+pub fn compute_workflow_bundle_digest(bundle: &WorkflowAttestationBundle) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"lora.workflow.bundle.v1\0");
+    hasher.update(bundle.schema_version.to_le_bytes());
+    hasher.update(bundle.exported_at_ms.to_le_bytes());
+    hasher.update((bundle.total_receipts as u64).to_le_bytes());
+    hasher.update([u8::from(bundle.all_receipts_verified)]);
+    hasher.update((bundle.receipts.len() as u64).to_le_bytes());
+    for rcpt in &bundle.receipts {
+        update_len_prefixed(&mut hasher, rcpt.workflow_id.as_bytes());
+        update_len_prefixed(
+            &mut hasher,
+            rcpt.config_sha256.to_ascii_lowercase().as_bytes(),
+        );
+        update_len_prefixed(
+            &mut hasher,
+            rcpt.receipt_sha256.to_ascii_lowercase().as_bytes(),
+        );
+    }
+    hex::encode(hasher.finalize())
+}
+
+/// Construct a cryptographically bound `WorkflowAttestationBundle` from a list of execution receipts.
+pub fn build_workflow_attestation_bundle(
+    receipts: Vec<WorkflowExecutionReceipt>,
+) -> WorkflowAttestationBundle {
+    let all_verified = receipts
+        .iter()
+        .all(|r| verify_receipt_self_integrity(r).is_ok());
+    let mut bundle = WorkflowAttestationBundle {
+        schema_version: 1,
+        exported_at_ms: crate::store::now_epoch_ms(),
+        total_receipts: receipts.len(),
+        all_receipts_verified: all_verified,
+        receipts,
+        bundle_sha256: String::new(),
+    };
+    bundle.bundle_sha256 = compute_workflow_bundle_digest(&bundle);
+    bundle
+}
+
+/// Verify cryptographic integrity of a `WorkflowAttestationBundle` and every receipt inside it.
+/// Fails closed with `LoraError::DigestMismatch` or `LoraError::MalformedArtifact` on any tampering.
+pub fn verify_workflow_attestation_bundle(
+    bundle: &WorkflowAttestationBundle,
+) -> Result<(), LoraError> {
+    if bundle.schema_version != 1 {
+        return Err(LoraError::MalformedArtifact(format!(
+            "unsupported workflow attestation bundle schema_version {}",
+            bundle.schema_version
+        )));
+    }
+    if bundle.total_receipts != bundle.receipts.len() {
+        return Err(LoraError::DigestMismatch {
+            expected: format!("total_receipts={}", bundle.total_receipts),
+            actual: format!("receipts.len()={}", bundle.receipts.len()),
+        });
+    }
+    for rcpt in &bundle.receipts {
+        verify_receipt_self_integrity(rcpt)?;
+    }
+    let expected_bundle_sha = compute_workflow_bundle_digest(bundle);
+    if !bundle
+        .bundle_sha256
+        .eq_ignore_ascii_case(&expected_bundle_sha)
+    {
+        return Err(LoraError::DigestMismatch {
+            expected: expected_bundle_sha,
+            actual: bundle.bundle_sha256.clone(),
+        });
+    }
+    if !bundle.all_receipts_verified {
+        return Err(LoraError::PolicyDenied(
+            "workflow attestation bundle marked as unverified".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub const MAX_VERIFY_DIGEST_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB bounded read cap
 
 fn is_windows_reserved_device(component: &str) -> bool {

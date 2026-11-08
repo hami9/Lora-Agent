@@ -7,13 +7,14 @@ use lora_core::{
     execute_workflow_job, format_multi_turn_prompt, now_epoch_ms, prepare_leakage_free_splits,
     preview_checked_patch, rollback_applied_patch, validate_catalog_variant,
     validate_specialist_handoff, validate_workflow_job, verify_receipt_self_integrity,
-    verify_workflow_receipt, AgentLimits, ApprovalDecision, ApprovalPromptPort, ApprovalRequest,
-    BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor, ChatTurn,
-    CompensatingPatchReceipt, ContextBudgetRequest, ExecutionMode, ExtensionManifestV1,
-    HardwareProbePort, HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig,
-    PatchProposal, PrivilegedBrokerGate, SpecialistHandoffEnvelope, TrainingExample,
-    TuningCacheKey, TuningProfile, TuningTrialSample, WorkflowJobConfig, WorkflowStepKind,
-    DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
+    verify_workflow_attestation_bundle, verify_workflow_receipt, AgentLimits, ApprovalDecision,
+    ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit, BrokerVerb,
+    CatalogVariantDescriptor, ChatTurn, CompensatingPatchReceipt, ContextBudgetRequest,
+    ExecutionMode, ExtensionManifestV1, HardwareProbePort, HeldOutEvaluationReceipt,
+    LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
+    SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
+    WorkflowAttestationBundle, WorkflowJobConfig, WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES,
+    TERMINAL_ASCII_BANNER,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -446,6 +447,12 @@ enum Commands {
         /// Verify cryptographic SHA-256 attestation of a recorded workflow receipt by workflow ID
         #[arg(long)]
         verify_receipt: Option<String>,
+        /// Export a cryptographically signed WorkflowAttestationBundle JSON file
+        #[arg(long)]
+        export_bundle: Option<PathBuf>,
+        /// Verify cryptographic integrity of an exported WorkflowAttestationBundle JSON file
+        #[arg(long)]
+        verify_bundle: Option<PathBuf>,
     },
 }
 
@@ -1436,7 +1443,31 @@ fn main() {
             non_fatal_steps,
             expected_config_sha256,
             verify_receipt,
+            export_bundle,
+            verify_bundle,
         } => {
+            if let Some(ref bundle_path) = verify_bundle {
+                let raw = std::fs::read_to_string(bundle_path)?;
+                let bundle: WorkflowAttestationBundle = serde_json::from_str(&raw)
+                    .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
+                verify_workflow_attestation_bundle(&bundle)?;
+                println!("=== Workflow Attestation Bundle Verification ===");
+                println!("Bundle SHA-256  : {}", bundle.bundle_sha256);
+                println!("Total Receipts  : {}", bundle.total_receipts);
+                println!("Status          : VERIFIED (bundle & all receipt SHA-256 chains intact)");
+                return Ok(());
+            }
+            if let Some(ref bundle_out) = export_bundle {
+                let bundle = app.store.export_workflow_attestation_bundle(Some(50))?;
+                let json = serde_json::to_string_pretty(&bundle)
+                    .map_err(|e| LoraError::Database(e.to_string()))?;
+                std::fs::write(bundle_out, json)?;
+                println!("=== Workflow Attestation Bundle Exported ===");
+                println!("Bundle SHA-256  : {}", bundle.bundle_sha256);
+                println!("Total Receipts  : {}", bundle.total_receipts);
+                println!("All Verified    : {}", bundle.all_receipts_verified);
+                return Ok(());
+            }
             if let Some(ref wf_id) = verify_receipt {
                 let stored = app.store.find_workflow_receipt(wf_id)?.ok_or_else(|| {
                     LoraError::PolicyDenied(format!(

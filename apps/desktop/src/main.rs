@@ -259,10 +259,18 @@ fn route_request(
                 "non_fatal_steps_supported": true,
                 "scoped_path_guard": true,
                 "receipt_attestation": true,
-                "receipt_self_verification": true
+                "receipt_self_verification": true,
+                "bundle_export_supported": true
             });
             HttpResponse::json(&status)
         }
+        "/api/workflow-bundle" => match app.store.export_workflow_attestation_bundle(Some(20)) {
+            Ok(bundle) => HttpResponse::json(&bundle),
+            Err(e) => HttpResponse::error(
+                "500 Internal Server Error",
+                &format!("{:?}", e.reason_code()),
+            ),
+        },
         "/api/workflow-verify" => match app.store.verify_stored_workflow_receipts(Some(20)) {
             Ok((checked, valid)) => HttpResponse::json(&serde_json::json!({
                 "status": if checked == valid { "verified" } else { "tampered" },

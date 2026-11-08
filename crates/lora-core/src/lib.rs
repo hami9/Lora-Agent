@@ -25,11 +25,13 @@ pub use admission::{
     ReservationLease, TuningProfile, DEFAULT_SAFETY_RESERVE_BYTES, RUNTIME_SCRATCH_BYTES,
 };
 pub use agent::{
+    build_workflow_attestation_bundle, compute_workflow_bundle_digest,
     compute_workflow_config_digest, compute_workflow_receipt_digest, execute_workflow_job,
     validate_specialist_handoff, validate_structured_proposal, validate_workflow_job,
-    validate_workflow_relative_path, verify_receipt_self_integrity, verify_workflow_receipt,
-    AgentLimits, AgentRunOutcome, BoundedAgentRuntime, CitedEvidence, SpecialistHandoffEnvelope,
-    ToolReceipt, WorkflowExecutionReceipt, WorkflowJobConfig, WorkflowStepKind,
+    validate_workflow_relative_path, verify_receipt_self_integrity,
+    verify_workflow_attestation_bundle, verify_workflow_receipt, AgentLimits, AgentRunOutcome,
+    BoundedAgentRuntime, CitedEvidence, SpecialistHandoffEnvelope, ToolReceipt,
+    WorkflowAttestationBundle, WorkflowExecutionReceipt, WorkflowJobConfig, WorkflowStepKind,
     WorkflowStepOutcome, WorkflowStepValidation, WorkflowValidationReceipt, DEFAULT_MAX_FILE_BYTES,
     DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TOOL_CALLS, DEFAULT_RUN_DEADLINE_SECS,
     MAX_VERIFY_DIGEST_BYTES,

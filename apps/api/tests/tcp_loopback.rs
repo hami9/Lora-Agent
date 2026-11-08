@@ -40,6 +40,8 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(openapi_str.contains("\"/v1/workflow/run\""));
     assert!(openapi_str.contains("\"/v1/workflow/{id}/cancel\""));
     assert!(openapi_str.contains("\"/v1/workflow/verify\""));
+    assert!(openapi_str.contains("\"/v1/workflow/bundle\""));
+    assert!(openapi_str.contains("\"/v1/workflow/bundle/verify\""));
 
     // 2. Spawn live `lora-api --once` on loopback port and send authenticated GET /v1/capabilities
     let bind_addr = find_free_loopback_addr();
@@ -147,7 +149,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "58",
+            "60",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -999,6 +1001,23 @@ fn loopback_api_live_tcp_socket_e2e() {
     ));
     assert!(r58.starts_with("HTTP/1.1 400 Bad Request"));
     assert!(r58.contains("digest_mismatch"));
+
+    // (bd) GET /v1/workflow/bundle exports portable WorkflowAttestationBundle
+    let r59 = send_http(&format!(
+        "GET /v1/workflow/bundle HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r59.starts_with("HTTP/1.1 200 OK"));
+    assert!(r59.contains("\"schema_version\":1"));
+    assert!(r59.contains("\"bundle_sha256\":"));
+    let bundle_json_str = r59.split("\r\n\r\n").nth(1).unwrap();
+
+    // (be) POST /v1/workflow/bundle/verify verifies exported bundle
+    let r60 = send_http(&format!(
+        "POST /v1/workflow/bundle/verify HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{bundle_json_str}",
+        bundle_json_str.len()
+    ));
+    assert!(r60.starts_with("HTTP/1.1 200 OK"));
+    assert!(r60.contains("\"verified\":true"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());
