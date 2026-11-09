@@ -214,7 +214,7 @@
         </div>
         <div class="card" id="workflow-live" hidden>
           <h2>Workflow Orchestrator Pipeline</h2>
-          <p><strong>Status:</strong> <span id="wf-status">Ready</span> | <strong>Mode:</strong> Air-Gapped Deterministic | <strong>Past Receipts:</strong> <span id="wf-receipts-count">0</span> | <strong>Latest Latency:</strong> <span id="wf-latest-duration">--</span> | <strong>Deadline Guard:</strong> <span id="wf-deadline-guard">Active</span> | <strong>Step Retries:</strong> <span id="wf-step-retries">Active (≤10)</span> | <strong>Fault Tolerance:</strong> <span id="wf-fault-tolerance">Non-Fatal Steps</span> | <strong>Path Guard:</strong> <span id="wf-path-guard">Scoped</span> | <strong>Attestation:</strong> <span id="wf-attestation">SHA-256 Bound</span> | <strong>Cancellation:</strong> <span id="wf-cancellation">Cooperative</span> | <strong>Patch Attestation:</strong> <span id="wf-patch-attestation">Verified Bound</span> | <strong>Audit Bundle:</strong> <span id="wf-audit-attestation">Verified Bound</span> | <strong>Extension Attestation:</strong> <span id="wf-ext-attestation">Verified Bound</span></p>
+          <p><strong>Status:</strong> <span id="wf-status">Ready</span> | <strong>Mode:</strong> Air-Gapped Deterministic | <strong>Past Receipts:</strong> <span id="wf-receipts-count">0</span> | <strong>Latest Latency:</strong> <span id="wf-latest-duration">--</span> | <strong>Deadline Guard:</strong> <span id="wf-deadline-guard">Active</span> | <strong>Step Retries:</strong> <span id="wf-step-retries">Active (≤10)</span> | <strong>Fault Tolerance:</strong> <span id="wf-fault-tolerance">Non-Fatal Steps</span> | <strong>Path Guard:</strong> <span id="wf-path-guard">Scoped</span> | <strong>Attestation:</strong> <span id="wf-attestation">SHA-256 Bound</span> | <strong>Cancellation:</strong> <span id="wf-cancellation">Cooperative</span> | <strong>Patch Attestation:</strong> <span id="wf-patch-attestation">Verified Bound</span> | <strong>Audit Bundle:</strong> <span id="wf-audit-attestation">Verified Bound</span> | <strong>Extension Attestation:</strong> <span id="wf-ext-attestation">Verified Bound</span> | <strong>Permit Attestation:</strong> <span id="wf-permit-attestation">Verified Bound</span></p>
         </div>
       </section>
 
@@ -467,6 +467,12 @@
           const eEl = document.getElementById('wf-ext-attestation');
           if (eEl) {
             eEl.textContent = 'Verified Bound (v1)';
+          }
+        }
+        if (w.policy_permit_attestation) {
+          const pEl = document.getElementById('wf-permit-attestation');
+          if (pEl) {
+            pEl.textContent = 'Verified Bound (v1)';
           }
         }
         document.getElementById('workflow-live').hidden = false;

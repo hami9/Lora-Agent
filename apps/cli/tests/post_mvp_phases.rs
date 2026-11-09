@@ -2936,3 +2936,183 @@ fn test_extension_manifest_containment_and_digest_attestation() {
     let digest = lora_core::compute_extension_manifest_digest(&valid_manifest);
     assert_eq!(digest.len(), 64);
 }
+
+/// `v0.2.17`: Policy execution permit cryptographic attestation and revocation epoch CLI.
+#[test]
+fn test_policy_permit_attestation_and_revocation_cli() {
+    use std::fs;
+    use std::process::Command;
+
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().expect("tempdir");
+
+    // 1. Inspect default policy gate status
+    let out_list = Command::new(lora_bin)
+        .args(["--data-dir", tmp.path().to_str().unwrap(), "policy"])
+        .output()
+        .unwrap();
+    assert!(out_list.status.success());
+    let list_txt = String::from_utf8_lossy(&out_list.stdout);
+    assert!(list_txt.contains("Revocation epoch"));
+    assert!(list_txt.contains("Active grants"));
+
+    // 2. Verify a valid ExecutionPermit JSON
+    let root_path = tmp.path().join("workspace");
+    fs::create_dir_all(&root_path).unwrap();
+    let root_handle = lora_core::ScopedRootHandle {
+        root_id: "root-101".to_string(),
+        canonical_root: root_path.clone(),
+        device_or_volume_id: 1,
+    };
+    let action_digest = lora_core::compute_action_digest(
+        "read_file",
+        1,
+        &root_handle.root_id,
+        &root_handle.canonical_root.to_string_lossy(),
+        "notes.txt",
+    );
+    let permit = lora_core::ExecutionPermit {
+        grant_id: "grant-root-101-1-1000".to_string(),
+        principal: "test-operator".to_string(),
+        run_id: "run-001".to_string(),
+        tool_id: "read_file".to_string(),
+        tool_version: 1,
+        action_digest,
+        root: root_handle,
+        relative_path: "notes.txt".to_string(),
+        max_bytes: 4096,
+        issued_epoch: 1,
+        expires_at_ms: lora_core::now_epoch_ms() + 60_000,
+    };
+    let permit_file = tmp.path().join("permit.json");
+    fs::write(&permit_file, serde_json::to_string(&permit).unwrap()).unwrap();
+
+    let out_verify = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "policy",
+            "--verify-permit",
+            permit_file.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out_verify.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out_verify.stderr)
+    );
+    let verify_txt = String::from_utf8_lossy(&out_verify.stdout);
+    assert!(verify_txt.contains("Verified Bound (lora.action.digest.v1)"));
+
+    // 3. Tampered permit fails verification
+    let mut tampered = permit.clone();
+    tampered.action_digest = "f".repeat(64);
+    let bad_permit_file = tmp.path().join("bad_permit.json");
+    fs::write(&bad_permit_file, serde_json::to_string(&tampered).unwrap()).unwrap();
+
+    let out_bad = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "policy",
+            "--verify-permit",
+            bad_permit_file.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!out_bad.status.success());
+    let bad_err = String::from_utf8_lossy(&out_bad.stderr);
+    assert!(bad_err.contains("action digest mismatch"));
+
+    // 4. Revoke all advances epoch
+    let out_revoke = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "policy",
+            "--revoke-all",
+        ])
+        .output()
+        .unwrap();
+    assert!(out_revoke.status.success());
+    let revoke_txt = String::from_utf8_lossy(&out_revoke.stdout);
+    assert!(revoke_txt.contains("All grants revoked."));
+    assert!(revoke_txt.contains("New revocation epoch : 2"));
+}
+
+/// `v0.2.17`: Tuning receipt cryptographic attestation and verification CLI.
+#[test]
+fn test_tuning_receipt_attestation_and_verification_cli() {
+    use std::fs;
+    use std::process::Command;
+
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().expect("tempdir");
+
+    let key = lora_core::TuningCacheKey {
+        hardware_fingerprint: "CPU-X86-16C".to_string(),
+        os_arch: "windows-x86_64".to_string(),
+        worker_revision: "pinned-worker-rev".to_string(),
+        model_sha256: "abc12345".repeat(8),
+        context_length: 2048,
+        profile: lora_core::TuningProfile::Balanced,
+    };
+    let mut receipt = lora_core::TuningReceipt {
+        key_digest: key.key_digest(),
+        key,
+        optimal_threads: 8,
+        optimal_batch_size: 256,
+        baseline_tok_per_sec_x100: 2000,
+        tuned_tok_per_sec_x100: 2400,
+        variance_pct: 2,
+        peak_rss_bytes: 64 * 1024 * 1024,
+        aborted_due_to_pressure_or_thermal: false,
+        created_at_ms: lora_core::now_epoch_ms(),
+        expires_at_ms: lora_core::now_epoch_ms() + 86_400_000,
+        receipt_sha256: None,
+    };
+    receipt.receipt_sha256 = Some(lora_core::compute_tuning_receipt_digest(&receipt));
+
+    let receipt_path = tmp.path().join("receipt.json");
+    fs::write(&receipt_path, serde_json::to_string(&receipt).unwrap()).unwrap();
+
+    // Verify receipt via CLI
+    let out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "tune",
+            "--verify-receipt",
+            receipt_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let txt = String::from_utf8_lossy(&out.stdout);
+    assert!(txt.contains("Verified Bound (lora.tuning.receipt.v1)"));
+
+    // Tampering fails verification
+    let mut bad_receipt = receipt.clone();
+    bad_receipt.optimal_threads = 32;
+    let bad_path = tmp.path().join("bad_receipt.json");
+    fs::write(&bad_path, serde_json::to_string(&bad_receipt).unwrap()).unwrap();
+
+    let out_bad = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "tune",
+            "--verify-receipt",
+            bad_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!out_bad.status.success());
+    let err_txt = String::from_utf8_lossy(&out_bad.stderr);
+    assert!(err_txt.contains("tuning receipt digest mismatch"));
+}

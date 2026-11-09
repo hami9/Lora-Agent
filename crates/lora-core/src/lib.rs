@@ -74,7 +74,7 @@ pub use plugins::{
 };
 pub use policy::{
     compute_action_digest, is_excluded_secret_resource, ExecutionMode, ExecutionPermit, PolicyGate,
-    SessionGrant, POLICY_REVISION,
+    SessionGrant, ACTION_DIGEST_DOMAIN_V1, POLICY_REVISION,
 };
 pub use ports::{
     ApprovalDecision, ApprovalPromptPort, ApprovalRequest, ChargingState, HardwareProbePort,
@@ -101,7 +101,10 @@ pub use training::{
     AdapterStudioOutcome, DatasetSplitManifest, HeldOutEvaluationReceipt, LoraJobConfig,
     TrainingExample,
 };
-pub use tuning::{TuningCacheKey, TuningReceipt, TuningTrialSample};
+pub use tuning::{
+    compute_tuning_receipt_digest, verify_tuning_receipt, TuningCacheKey, TuningReceipt,
+    TuningTrialSample, TUNING_RECEIPT_DOMAIN_V1,
+};
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;

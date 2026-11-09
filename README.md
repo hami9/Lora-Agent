@@ -26,7 +26,7 @@
 ## Workspace Architecture
 
 ```text
-├── Cargo.toml                  # Workspace root (version = "0.2.16")
+├── Cargo.toml                  # Workspace root (version = "0.2.17")
 ├── crates/
 │   ├── lora-protocol/          # v1 32-bit BE JSON framing, closed schemas & streaming GGUF v2/v3 parser
 │   ├── lora-core/              # App service, SQLite store, registry, HIE, policy gate & RAG

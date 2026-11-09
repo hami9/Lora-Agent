@@ -20,8 +20,9 @@ use lora_core::{
 use lora_core::{
     compute_extension_manifest_digest, compute_patch_receipt_digest,
     verify_audit_attestation_bundle, verify_compensating_patch_receipt,
-    verify_receipt_self_integrity, verify_workflow_attestation_bundle, verify_workflow_receipt,
-    AuditAttestationBundle, WorkflowAttestationBundle,
+    verify_receipt_self_integrity, verify_tuning_receipt, verify_workflow_attestation_bundle,
+    verify_workflow_receipt, AuditAttestationBundle, ExecutionPermit, TuningReceipt,
+    WorkflowAttestationBundle,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -1161,6 +1162,156 @@ fn handle_http_connection(
                         "schema_version": bundle.schema_version,
                         "total_events": bundle.total_events,
                         "bundle_sha256": bundle.bundle_sha256,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "verified": false,
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("GET", "/v1/policy/grants") => {
+            let grants = app.policy.list_grants();
+            let current_epoch = app.policy.current_epoch();
+            let body = serde_json::json!({
+                "revocation_epoch": current_epoch,
+                "grants": grants,
+                "count": grants.len(),
+            })
+            .to_string();
+            write_http_response(stream, "200 OK", "application/json", &body)
+        }
+        ("POST", "/v1/policy/revoke") => {
+            let req_json: serde_json::Value =
+                serde_json::from_str(&body_str).unwrap_or(serde_json::Value::Null);
+            let grant_id = req_json.get("grant_id").and_then(|v| v.as_str());
+            let (new_epoch, details) = if let Some(gid) = grant_id {
+                let ep = app.policy.revoke_grant(gid);
+                (ep, serde_json::json!({ "revoked_grant_id": gid }))
+            } else {
+                let ep = app.policy.revoke_all_grants();
+                (ep, serde_json::json!({ "revoked_all": true }))
+            };
+            let body = serde_json::json!({
+                "new_revocation_epoch": new_epoch,
+                "action": details,
+            })
+            .to_string();
+            write_http_response(stream, "200 OK", "application/json", &body)
+        }
+        ("POST", "/v1/policy/verify-permit") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let permit_val = req_json
+                .get("permit")
+                .cloned()
+                .unwrap_or_else(|| req_json.clone());
+            let permit: ExecutionPermit = match serde_json::from_value(permit_val) {
+                Ok(p) => p,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid execution permit payload: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            match app.policy.verify_permit_live(&permit) {
+                Ok(()) => {
+                    let body = serde_json::json!({
+                        "verified": true,
+                        "action_digest": permit.action_digest,
+                        "grant_id": permit.grant_id,
+                        "issued_epoch": permit.issued_epoch,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "verified": false,
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("POST", "/v1/tuning/verify-receipt") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let receipt_val = req_json
+                .get("receipt")
+                .cloned()
+                .unwrap_or_else(|| req_json.clone());
+            let receipt: TuningReceipt = match serde_json::from_value(receipt_val) {
+                Ok(r) => r,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid tuning receipt payload: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let expected_rev = req_json
+                .get("worker_revision")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&receipt.key.worker_revision);
+            match verify_tuning_receipt(&receipt, expected_rev, now_epoch_ms()) {
+                Ok(()) => {
+                    let body = serde_json::json!({
+                        "verified": true,
+                        "key_digest": receipt.key_digest,
+                        "receipt_sha256": receipt.receipt_sha256,
                     })
                     .to_string();
                     write_http_response(stream, "200 OK", "application/json", &body)

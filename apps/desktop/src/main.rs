@@ -264,7 +264,9 @@ fn route_request(
                 "cancellation_token_supported": true,
                 "patch_rollback_attestation": true,
                 "audit_bundle_export_supported": true,
-                "extension_manifest_attestation": true
+                "extension_manifest_attestation": true,
+                "policy_permit_attestation": true,
+                "tuning_receipt_attestation": true
             });
             HttpResponse::json(&status)
         }

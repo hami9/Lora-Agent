@@ -23,6 +23,18 @@ pub enum TuningProfile {
     BatterySaver,
 }
 
+impl TuningProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::Balanced => "balanced",
+            Self::MaximumPerformance => "maximum_performance",
+            Self::LowMemory => "low_memory",
+            Self::BatterySaver => "battery_saver",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryEstimate {
     pub weights_bytes: u64,

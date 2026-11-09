@@ -3,20 +3,21 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use lora_core::{
     allocate_context_budget, apply_approved_patch, classify_artifact_compatibility,
-    compute_extension_manifest_digest, compute_patch_receipt_digest,
+    compute_action_digest, compute_extension_manifest_digest, compute_patch_receipt_digest,
     compute_workflow_config_digest, default_risk_register_matrix, evaluate_adapter_promotion_gate,
     execute_workflow_job_cancellable, format_multi_turn_prompt, now_epoch_ms,
     prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
     validate_catalog_variant, validate_specialist_handoff, validate_workflow_job,
     verify_audit_attestation_bundle, verify_compensating_patch_receipt,
-    verify_receipt_self_integrity, verify_workflow_attestation_bundle, verify_workflow_receipt,
-    AgentLimits, ApprovalDecision, ApprovalPromptPort, ApprovalRequest, AuditAttestationBundle,
-    BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor, ChatTurn,
-    CompensatingPatchReceipt, ContextBudgetRequest, ExecutionMode, ExtensionManifestV1,
-    HardwareProbePort, HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig,
-    PatchProposal, PrivilegedBrokerGate, SpecialistHandoffEnvelope, TrainingExample,
-    TuningCacheKey, TuningProfile, TuningTrialSample, WorkflowAttestationBundle, WorkflowJobConfig,
-    WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
+    verify_receipt_self_integrity, verify_tuning_receipt, verify_workflow_attestation_bundle,
+    verify_workflow_receipt, AgentLimits, ApprovalDecision, ApprovalPromptPort, ApprovalRequest,
+    AuditAttestationBundle, BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor, ChatTurn,
+    CompensatingPatchReceipt, ContextBudgetRequest, ExecutionMode, ExecutionPermit,
+    ExtensionManifestV1, HardwareProbePort, HeldOutEvaluationReceipt, LoraApplicationService,
+    LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate, SpecialistHandoffEnvelope,
+    TrainingExample, TuningCacheKey, TuningProfile, TuningReceipt, TuningTrialSample,
+    WorkflowAttestationBundle, WorkflowJobConfig, WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES,
+    TERMINAL_ASCII_BANNER,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -216,6 +217,19 @@ enum Commands {
         prune_keep: Option<usize>,
     },
 
+    /// Inspect active grants, advance revocation epochs, or verify execution permits (`docs/SECURITY_ARCHITECTURE.md`, `M6`)
+    Policy {
+        /// Revoke a specific grant ID and advance revocation epoch
+        #[arg(long)]
+        revoke: Option<String>,
+        /// Revoke all active grants and scoped roots
+        #[arg(long)]
+        revoke_all: bool,
+        /// Optional path to an ExecutionPermit JSON file to verify cryptographic binding
+        #[arg(long)]
+        verify_permit: Option<PathBuf>,
+    },
+
     /// Execute emergency incident recovery: revoke all active grants, quarantine an extension, and interrupt non-terminal runs (`docs/SECURITY_ARCHITECTURE.md`)
     IncidentRecover {
         /// Optional extension ID to quarantine immediately
@@ -340,6 +354,9 @@ enum Commands {
         /// Optional path to export tuning receipt JSON
         #[arg(long)]
         receipt_out: Option<PathBuf>,
+        /// Optional path to a TuningReceipt JSON file to verify cryptographic binding
+        #[arg(long)]
+        verify_receipt: Option<PathBuf>,
     },
 
     /// Validate leakage-free source-grouped dataset split and evaluate Adapter Studio promotion gate (`docs/TRAINING_SYSTEM.md`)
@@ -1024,6 +1041,80 @@ fn main() {
             }
             Ok(())
         }
+        Commands::Policy {
+            revoke,
+            revoke_all,
+            verify_permit,
+        } => {
+            if let Some(permit_path) = verify_permit {
+                let json = std::fs::read_to_string(&permit_path).map_err(|e| {
+                    LoraError::MalformedArtifact(format!("cannot read permit file: {e}"))
+                })?;
+                let permit: ExecutionPermit = serde_json::from_str(&json).map_err(|e| {
+                    LoraError::MalformedArtifact(format!("invalid permit json: {e}"))
+                })?;
+
+                let expected_digest = compute_action_digest(
+                    &permit.tool_id,
+                    permit.tool_version,
+                    &permit.root.root_id,
+                    &permit.root.canonical_root.to_string_lossy(),
+                    &permit.relative_path,
+                );
+                if permit.action_digest != expected_digest {
+                    return Err(LoraError::PolicyDenied(format!(
+                        "action digest mismatch: expected {expected_digest}, got {}",
+                        permit.action_digest
+                    )));
+                }
+
+                println!("Permit action digest : {}", permit.action_digest);
+                println!("Grant ID             : {}", permit.grant_id);
+                println!("Principal            : {}", permit.principal);
+                println!(
+                    "Tool                 : {}@v{}",
+                    permit.tool_id, permit.tool_version
+                );
+                println!("Root ID              : {}", permit.root.root_id);
+                println!("Relative path        : {}", permit.relative_path);
+                println!("Issued epoch         : {}", permit.issued_epoch);
+                println!("Expires at ms        : {}", permit.expires_at_ms);
+                println!("Integrity status     : Verified Bound (lora.action.digest.v1)");
+                return Ok(());
+            }
+
+            if revoke_all {
+                let new_epoch = app.policy.revoke_all_grants();
+                println!("All grants revoked.");
+                println!("New revocation epoch : {new_epoch}");
+                return Ok(());
+            }
+
+            if let Some(gid) = revoke {
+                let new_epoch = app.policy.revoke_grant(&gid);
+                println!("Grant revoked        : {gid}");
+                println!("New revocation epoch : {new_epoch}");
+                return Ok(());
+            }
+
+            let grants = app.policy.list_grants();
+            println!("Revocation epoch     : {}", app.policy.current_epoch());
+            println!("Active grants        : {}", grants.len());
+            for g in grants {
+                let rem_sec = g.expires_at_ms.saturating_sub(now_epoch_ms()) / 1000;
+                println!(
+                    "  - [{}] subject={} tool={}@v{} root={} (expires in {}s, one_time={})",
+                    g.grant_id,
+                    g.subject,
+                    g.tool_id,
+                    g.tool_version,
+                    g.root.root_id,
+                    rem_sec,
+                    g.one_time
+                );
+            }
+            Ok(())
+        }
         Commands::IncidentRecover {
             quarantine_extension,
         } => {
@@ -1198,7 +1289,27 @@ fn main() {
             profile,
             list,
             receipt_out,
+            verify_receipt,
         } => {
+            if let Some(verify_p) = verify_receipt {
+                let json = std::fs::read_to_string(&verify_p).map_err(|e| {
+                    LoraError::MalformedArtifact(format!("cannot read tuning receipt: {e}"))
+                })?;
+                let receipt: TuningReceipt = serde_json::from_str(&json).map_err(|e| {
+                    LoraError::MalformedArtifact(format!("invalid tuning receipt json: {e}"))
+                })?;
+                verify_tuning_receipt(&receipt, &receipt.key.worker_revision, now_epoch_ms())?;
+                println!("Tuning key digest : {}", receipt.key_digest);
+                println!(
+                    "Receipt digest    : {}",
+                    receipt.receipt_sha256.as_deref().unwrap_or("none")
+                );
+                println!("Worker revision   : {}", receipt.key.worker_revision);
+                println!("Optimal threads   : {}", receipt.optimal_threads);
+                println!("Optimal batch     : {}", receipt.optimal_batch_size);
+                println!("Integrity status  : Verified Bound (lora.tuning.receipt.v1)");
+                return Ok(());
+            }
             if list {
                 let receipts = app.store.list_tuning_receipts()?;
                 println!("Stored tuning receipts: {}", receipts.len());
@@ -1269,6 +1380,10 @@ fn main() {
             println!(
                 "Aborted (thermal) : {}",
                 receipt.aborted_due_to_pressure_or_thermal
+            );
+            println!(
+                "Receipt digest    : {}",
+                receipt.receipt_sha256.as_deref().unwrap_or("none")
             );
             if let Some(out_p) = receipt_out {
                 let json = serde_json::to_string_pretty(&receipt)

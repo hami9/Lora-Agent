@@ -8,6 +8,14 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Domain separation prefix for TuningReceipt cryptographic attestation (`docs/HARDWARE_INTELLIGENCE.md`, `R16`).
+pub const TUNING_RECEIPT_DOMAIN_V1: &[u8] = b"lora.tuning.receipt.v1\0";
+
+fn update_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
 /// Composite key identifying a specific hardware, OS, worker build, model, context, and profile tuple (`docs/HARDWARE_INTELLIGENCE.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TuningCacheKey {
@@ -41,6 +49,60 @@ pub struct TuningReceipt {
     pub aborted_due_to_pressure_or_thermal: bool,
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_sha256: Option<String>,
+}
+
+/// Compute a domain-separated canonical SHA-256 digest over a TuningReceipt (`lora.tuning.receipt.v1`).
+pub fn compute_tuning_receipt_digest(receipt: &TuningReceipt) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(TUNING_RECEIPT_DOMAIN_V1);
+    update_len_prefixed(&mut hasher, receipt.key.hardware_fingerprint.as_bytes());
+    update_len_prefixed(&mut hasher, receipt.key.os_arch.as_bytes());
+    update_len_prefixed(&mut hasher, receipt.key.worker_revision.as_bytes());
+    update_len_prefixed(&mut hasher, receipt.key.model_sha256.as_bytes());
+    hasher.update(receipt.key.context_length.to_le_bytes());
+    update_len_prefixed(&mut hasher, receipt.key.profile.as_str().as_bytes());
+    hasher.update(receipt.optimal_threads.to_le_bytes());
+    hasher.update(receipt.optimal_batch_size.to_le_bytes());
+    hasher.update(receipt.baseline_tok_per_sec_x100.to_le_bytes());
+    hasher.update(receipt.tuned_tok_per_sec_x100.to_le_bytes());
+    hasher.update(receipt.variance_pct.to_le_bytes());
+    hasher.update(receipt.peak_rss_bytes.to_le_bytes());
+    hasher.update([if receipt.aborted_due_to_pressure_or_thermal {
+        1u8
+    } else {
+        0u8
+    }]);
+    hasher.update(receipt.created_at_ms.to_le_bytes());
+    hasher.update(receipt.expires_at_ms.to_le_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Verify the cryptographic integrity, worker revision match, and non-expiration of a TuningReceipt.
+pub fn verify_tuning_receipt(
+    receipt: &TuningReceipt,
+    expected_worker_revision: &str,
+    now_ms: u64,
+) -> Result<(), LoraError> {
+    if receipt.key.worker_revision != expected_worker_revision {
+        return Err(LoraError::PolicyDenied(format!(
+            "worker revision mismatch in tuning receipt: expected {expected_worker_revision}, got {}",
+            receipt.key.worker_revision
+        )));
+    }
+    if now_ms > receipt.expires_at_ms {
+        return Err(LoraError::GrantRevokedOrExpired);
+    }
+    if let Some(expected_digest) = &receipt.receipt_sha256 {
+        let computed = compute_tuning_receipt_digest(receipt);
+        if computed != *expected_digest {
+            return Err(LoraError::PolicyDenied(format!(
+                "tuning receipt digest mismatch: expected {expected_digest}, got {computed}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,7 +148,7 @@ impl SqliteStore {
 
         // Check if any trial triggered thermal throttling or memory pressure
         if trials.iter().any(|t| t.thermal_or_memory_warning) {
-            let fallback = TuningReceipt {
+            let mut fallback = TuningReceipt {
                 key_digest: key_digest.clone(),
                 key,
                 optimal_threads: baseline_threads,
@@ -98,7 +160,9 @@ impl SqliteStore {
                 aborted_due_to_pressure_or_thermal: true,
                 created_at_ms: now,
                 expires_at_ms: now.saturating_add(ttl_ms),
+                receipt_sha256: None,
             };
+            fallback.receipt_sha256 = Some(compute_tuning_receipt_digest(&fallback));
             return Ok(fallback);
         }
 
@@ -109,7 +173,7 @@ impl SqliteStore {
             .filter(|t| t.variance_pct <= 10 && t.tok_per_sec_x100 >= min_required_tps)
             .max_by_key(|t| t.tok_per_sec_x100);
 
-        let receipt = match best {
+        let mut receipt = match best {
             Some(winner) => TuningReceipt {
                 key_digest: key_digest.clone(),
                 key: key.clone(),
@@ -122,6 +186,7 @@ impl SqliteStore {
                 aborted_due_to_pressure_or_thermal: false,
                 created_at_ms: now,
                 expires_at_ms: now.saturating_add(ttl_ms),
+                receipt_sha256: None,
             },
             None => TuningReceipt {
                 key_digest: key_digest.clone(),
@@ -135,8 +200,10 @@ impl SqliteStore {
                 aborted_due_to_pressure_or_thermal: false,
                 created_at_ms: now,
                 expires_at_ms: now.saturating_add(ttl_ms),
+                receipt_sha256: None,
             },
         };
+        receipt.receipt_sha256 = Some(compute_tuning_receipt_digest(&receipt));
 
         let json =
             serde_json::to_string(&receipt).map_err(|e| LoraError::Database(e.to_string()))?;
@@ -185,6 +252,9 @@ impl SqliteStore {
         }
         let parsed: TuningReceipt =
             serde_json::from_str(&json).map_err(|e| LoraError::Database(e.to_string()))?;
+        if verify_tuning_receipt(&parsed, &key.worker_revision, now_ms).is_err() {
+            return Ok(None);
+        }
         Ok(Some(parsed))
     }
 
@@ -203,5 +273,67 @@ impl SqliteStore {
             }
         }
         Ok(receipts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_key() -> TuningCacheKey {
+        TuningCacheKey {
+            hardware_fingerprint: "AMD Ryzen 9".to_string(),
+            os_arch: "windows-x86_64".to_string(),
+            worker_revision: "b4000".to_string(),
+            model_sha256: "deadbeef".repeat(8),
+            context_length: 2048,
+            profile: TuningProfile::MaximumPerformance,
+        }
+    }
+
+    #[test]
+    fn test_compute_tuning_receipt_digest_and_verification() {
+        let key = sample_key();
+        let mut receipt = TuningReceipt {
+            key_digest: key.key_digest(),
+            key: key.clone(),
+            optimal_threads: 8,
+            optimal_batch_size: 512,
+            baseline_tok_per_sec_x100: 2000,
+            tuned_tok_per_sec_x100: 2500,
+            variance_pct: 3,
+            peak_rss_bytes: 64 * 1024 * 1024,
+            aborted_due_to_pressure_or_thermal: false,
+            created_at_ms: 100_000,
+            expires_at_ms: 200_000,
+            receipt_sha256: None,
+        };
+
+        let digest = compute_tuning_receipt_digest(&receipt);
+        assert_eq!(digest.len(), 64);
+        receipt.receipt_sha256 = Some(digest.clone());
+
+        // Valid verification passes
+        assert!(verify_tuning_receipt(&receipt, "b4000", 150_000).is_ok());
+
+        // Worker revision mismatch fails
+        assert!(matches!(
+            verify_tuning_receipt(&receipt, "b4001", 150_000),
+            Err(LoraError::PolicyDenied(_))
+        ));
+
+        // Expiration fails
+        assert!(matches!(
+            verify_tuning_receipt(&receipt, "b4000", 250_000),
+            Err(LoraError::GrantRevokedOrExpired)
+        ));
+
+        // Tampering optimal_threads fails digest verification
+        let mut tampered = receipt.clone();
+        tampered.optimal_threads = 16;
+        assert!(matches!(
+            verify_tuning_receipt(&tampered, "b4000", 150_000),
+            Err(LoraError::PolicyDenied(_))
+        ));
     }
 }
