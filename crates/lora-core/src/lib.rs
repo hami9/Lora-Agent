@@ -68,8 +68,9 @@ pub use patch_tool::{
     PatchPreview, PatchProposal,
 };
 pub use plugins::{
-    validate_extension_manifest, verify_no_dependency_cycles, ExtensionHostManager,
-    ExtensionManifestV1, ExtensionState, HostApiVersion, InstalledExtensionRecord,
+    compute_extension_manifest_digest, validate_extension_manifest, verify_no_dependency_cycles,
+    ExtensionHostManager, ExtensionManifestV1, ExtensionState, HostApiVersion,
+    InstalledExtensionRecord,
 };
 pub use policy::{
     compute_action_digest, is_excluded_secret_resource, ExecutionMode, ExecutionPermit, PolicyGate,

@@ -263,7 +263,8 @@ fn route_request(
                 "bundle_export_supported": true,
                 "cancellation_token_supported": true,
                 "patch_rollback_attestation": true,
-                "audit_bundle_export_supported": true
+                "audit_bundle_export_supported": true,
+                "extension_manifest_attestation": true
             });
             HttpResponse::json(&status)
         }

@@ -3,9 +3,10 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use lora_core::{
     allocate_context_budget, apply_approved_patch, classify_artifact_compatibility,
-    compute_patch_receipt_digest, compute_workflow_config_digest, default_risk_register_matrix,
-    evaluate_adapter_promotion_gate, execute_workflow_job_cancellable, format_multi_turn_prompt,
-    now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
+    compute_extension_manifest_digest, compute_patch_receipt_digest,
+    compute_workflow_config_digest, default_risk_register_matrix, evaluate_adapter_promotion_gate,
+    execute_workflow_job_cancellable, format_multi_turn_prompt, now_epoch_ms,
+    prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
     validate_catalog_variant, validate_specialist_handoff, validate_workflow_job,
     verify_audit_attestation_bundle, verify_compensating_patch_receipt,
     verify_receipt_self_integrity, verify_workflow_attestation_bundle, verify_workflow_receipt,
@@ -717,9 +718,10 @@ fn main() {
                 let digest = sha256.unwrap_or_else(|| "sha256_local_unverified".to_string());
                 let st = host.stage_and_verify(manifest.clone(), &digest, &digest)?;
                 app.store.save_extension_host(&host)?;
+                let manifest_digest = compute_extension_manifest_digest(&manifest);
                 println!(
-                    "Staged and verified extension '{}' v{} -> {:?}",
-                    manifest.id, manifest.version, st
+                    "Staged and verified extension '{}' v{} (manifest_digest={}) -> {:?}",
+                    manifest.id, manifest.version, manifest_digest, st
                 );
             }
             if let Some(ext_id) = activate {

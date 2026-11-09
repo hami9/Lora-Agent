@@ -3,6 +3,7 @@
 
 use crate::error::LoraError;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub const SUPPORTED_EXTENSION_HOST_MAJOR: u16 = 1;
@@ -49,6 +50,40 @@ pub struct InstalledExtensionRecord {
     pub approved_capabilities: BTreeSet<String>,
     pub consecutive_faults: u32,
     pub previous_compatible_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_sha256: Option<String>,
+}
+
+fn update_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// Compute a deterministic, domain-separated SHA-256 digest (`lora.extension.manifest.v1`)
+/// over an `ExtensionManifestV1`.
+pub fn compute_extension_manifest_digest(manifest: &ExtensionManifestV1) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"lora.extension.manifest.v1\0");
+    hasher.update(manifest.manifest_version.to_le_bytes());
+    update_len_prefixed(&mut hasher, manifest.id.as_bytes());
+    update_len_prefixed(&mut hasher, manifest.version.as_bytes());
+    update_len_prefixed(&mut hasher, manifest.kind.as_bytes());
+    hasher.update(manifest.host_api.major.to_le_bytes());
+    hasher.update(manifest.host_api.minimum_minor.to_le_bytes());
+    update_len_prefixed(&mut hasher, manifest.entry.as_bytes());
+    hasher.update((manifest.exports.len() as u64).to_le_bytes());
+    for exp in &manifest.exports {
+        update_len_prefixed(&mut hasher, exp.as_bytes());
+    }
+    hasher.update((manifest.requests.len() as u64).to_le_bytes());
+    for req in &manifest.requests {
+        update_len_prefixed(&mut hasher, req.as_bytes());
+    }
+    hasher.update((manifest.dependencies.len() as u64).to_le_bytes());
+    for dep in &manifest.dependencies {
+        update_len_prefixed(&mut hasher, dep.as_bytes());
+    }
+    hex::encode(hasher.finalize())
 }
 
 /// Validate an extension manifest against `docs/PLUGIN_SYSTEM.md` security rules:
@@ -70,10 +105,21 @@ pub fn validate_extension_manifest(manifest: &ExtensionManifestV1) -> Result<(),
             manifest.host_api.major, SUPPORTED_EXTENSION_HOST_MAJOR
         )));
     }
-    if manifest.id.trim().is_empty() || manifest.id.len() > 128 {
+    let trimmed_id = manifest.id.trim();
+    if trimmed_id.is_empty() || manifest.id.len() > 128 || trimmed_id != manifest.id {
         return Err(LoraError::MalformedArtifact(
-            "extension id must be 1..=128 characters".to_string(),
+            "extension id must be 1..=128 non-padded characters".to_string(),
         ));
+    }
+    if !manifest
+        .id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(LoraError::MalformedArtifact(format!(
+            "invalid characters in extension id '{}' (allowed: [a-zA-Z0-9._-])",
+            manifest.id
+        )));
     }
     if !matches!(
         manifest.kind.as_str(),
@@ -84,17 +130,12 @@ pub fn validate_extension_manifest(manifest: &ExtensionManifestV1) -> Result<(),
             manifest.kind
         )));
     }
-    if manifest.entry.is_empty()
-        || manifest.entry.starts_with('/')
-        || manifest.entry.starts_with('\\')
-        || manifest.entry.contains("..")
-        || manifest.entry.contains(':')
-    {
-        return Err(LoraError::ScopeEscapeAttempt(format!(
-            "unsafe extension entry path '{}'",
+    crate::agent::validate_workflow_relative_path(&manifest.entry).map_err(|reason| {
+        LoraError::ScopeEscapeAttempt(format!(
+            "unsafe extension entry path '{}': {reason}",
             manifest.entry
-        )));
-    }
+        ))
+    })?;
     for req in &manifest.requests {
         if req.starts_with("ambient.") || req == "shell.exec" || req == "host.credentials" {
             return Err(LoraError::PolicyDenied(format!(
@@ -194,6 +235,7 @@ impl ExtensionHostManager {
             .get(&manifest.id)
             .map(|old| old.package_sha256.clone());
 
+        let manifest_digest = compute_extension_manifest_digest(&manifest);
         let id = manifest.id.clone();
         self.records.insert(
             id,
@@ -204,6 +246,7 @@ impl ExtensionHostManager {
                 approved_capabilities: BTreeSet::new(),
                 consecutive_faults: 0,
                 previous_compatible_digest: prev_digest,
+                manifest_sha256: Some(manifest_digest),
             },
         );
 
@@ -347,5 +390,73 @@ impl crate::store::SqliteStore {
             )?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_extension_manifest_path_and_id_containment() {
+        let mut manifest = ExtensionManifestV1 {
+            manifest_version: 1,
+            id: "org.example.good".to_string(),
+            version: "1.0.0".to_string(),
+            kind: "wasm-component".to_string(),
+            host_api: HostApiVersion {
+                major: 1,
+                minimum_minor: 0,
+            },
+            entry: "component.wasm".to_string(),
+            exports: vec!["tool.wordcount.v1".to_string()],
+            requests: vec!["input.text".to_string()],
+            dependencies: vec![],
+        };
+        assert!(validate_extension_manifest(&manifest).is_ok());
+
+        // Reserved Windows device name in entry fails closed
+        manifest.entry = "CON".to_string();
+        assert!(matches!(
+            validate_extension_manifest(&manifest),
+            Err(LoraError::ScopeEscapeAttempt(_))
+        ));
+
+        // Directory traversal in entry fails closed
+        manifest.entry = "../component.wasm".to_string();
+        assert!(matches!(
+            validate_extension_manifest(&manifest),
+            Err(LoraError::ScopeEscapeAttempt(_))
+        ));
+
+        // Invalid characters in ID fails closed
+        manifest.entry = "component.wasm".to_string();
+        manifest.id = "bad id with spaces".to_string();
+        assert!(matches!(
+            validate_extension_manifest(&manifest),
+            Err(LoraError::MalformedArtifact(_))
+        ));
+    }
+
+    #[test]
+    fn test_compute_extension_manifest_digest_deterministic() {
+        let manifest = ExtensionManifestV1 {
+            manifest_version: 1,
+            id: "org.example.test".to_string(),
+            version: "1.0.0".to_string(),
+            kind: "wasm-component".to_string(),
+            host_api: HostApiVersion {
+                major: 1,
+                minimum_minor: 0,
+            },
+            entry: "component.wasm".to_string(),
+            exports: vec!["tool.test.v1".to_string()],
+            requests: vec![],
+            dependencies: vec![],
+        };
+        let d1 = compute_extension_manifest_digest(&manifest);
+        let d2 = compute_extension_manifest_digest(&manifest);
+        assert_eq!(d1, d2);
+        assert_eq!(d1.len(), 64);
     }
 }

@@ -2847,3 +2847,92 @@ fn test_audit_attestation_bundle_export_and_verification() {
     let tampered_err = String::from_utf8_lossy(&tampered_out.stderr);
     assert!(tampered_err.contains("DigestMismatch") || tampered_err.contains("digest mismatch"));
 }
+
+/// `v0.2.16`: Extension manifest containment hardening and cryptographic attestation digest.
+#[test]
+fn test_extension_manifest_containment_and_digest_attestation() {
+    use std::fs;
+    use std::process::Command;
+
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().expect("tempdir");
+
+    // 1. Rejects dangerous entry paths (e.g. CON, traversal)
+    let bad_manifest = lora_core::ExtensionManifestV1 {
+        manifest_version: 1,
+        id: "org.example.dangerous".to_string(),
+        version: "1.0.0".to_string(),
+        kind: "wasm-component".to_string(),
+        host_api: lora_core::HostApiVersion {
+            major: 1,
+            minimum_minor: 0,
+        },
+        entry: "CON".to_string(),
+        exports: vec!["tool.v1".to_string()],
+        requests: vec![],
+        dependencies: vec![],
+    };
+    let bad_manifest_path = tmp.path().join("bad_manifest.json");
+    fs::write(
+        &bad_manifest_path,
+        serde_json::to_string(&bad_manifest).unwrap(),
+    )
+    .unwrap();
+
+    let stage_bad = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "plugins",
+            "--stage-manifest",
+            bad_manifest_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!stage_bad.status.success());
+    let err_str = String::from_utf8_lossy(&stage_bad.stderr);
+    assert!(err_str.contains("unsafe extension entry path") || err_str.contains("scope escape"));
+
+    // 2. Stages valid manifest with manifest_digest
+    let valid_manifest = lora_core::ExtensionManifestV1 {
+        manifest_version: 1,
+        id: "org.example.verified".to_string(),
+        version: "1.0.0".to_string(),
+        kind: "wasm-component".to_string(),
+        host_api: lora_core::HostApiVersion {
+            major: 1,
+            minimum_minor: 0,
+        },
+        entry: "verified.wasm".to_string(),
+        exports: vec!["tool.v1".to_string()],
+        requests: vec![],
+        dependencies: vec![],
+    };
+    let valid_manifest_path = tmp.path().join("valid_manifest.json");
+    fs::write(
+        &valid_manifest_path,
+        serde_json::to_string(&valid_manifest).unwrap(),
+    )
+    .unwrap();
+
+    let stage_good = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "plugins",
+            "--stage-manifest",
+            valid_manifest_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        stage_good.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stage_good.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&stage_good.stdout);
+    assert!(stdout.contains("manifest_digest="));
+
+    let digest = lora_core::compute_extension_manifest_digest(&valid_manifest);
+    assert_eq!(digest.len(), 64);
+}

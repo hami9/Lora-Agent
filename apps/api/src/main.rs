@@ -18,10 +18,10 @@ use lora_core::{
     WorkflowExecutionReceipt, WorkflowJobConfig, DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_core::{
-    compute_patch_receipt_digest, verify_audit_attestation_bundle,
-    verify_compensating_patch_receipt, verify_receipt_self_integrity,
-    verify_workflow_attestation_bundle, verify_workflow_receipt, AuditAttestationBundle,
-    WorkflowAttestationBundle,
+    compute_extension_manifest_digest, compute_patch_receipt_digest,
+    verify_audit_attestation_bundle, verify_compensating_patch_receipt,
+    verify_receipt_self_integrity, verify_workflow_attestation_bundle, verify_workflow_receipt,
+    AuditAttestationBundle, WorkflowAttestationBundle,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -477,6 +477,7 @@ fn handle_http_connection(
                         "status": "staged",
                         "extension_id": manifest.id,
                         "state": state,
+                        "manifest_digest": compute_extension_manifest_digest(&manifest),
                     })
                     .to_string();
                     write_http_response(stream, "200 OK", "application/json", &body)
