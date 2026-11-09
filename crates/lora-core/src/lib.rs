@@ -91,8 +91,9 @@ pub use registry::{
     ImportStatus, ManifestFileEntry, ModelManifestV1, ModelRegistry,
 };
 pub use store::{
-    keyed_correlation_digest, now_epoch_ms, AuditRecord, ModelLifecycleState, ReconciliationReport,
-    RunState, SqliteStore, CURRENT_SCHEMA_VERSION,
+    build_audit_attestation_bundle, compute_audit_bundle_digest, keyed_correlation_digest,
+    now_epoch_ms, verify_audit_attestation_bundle, AuditAttestationBundle, AuditRecord,
+    ModelLifecycleState, ReconciliationReport, RunState, SqliteStore, CURRENT_SCHEMA_VERSION,
 };
 pub use training::{
     evaluate_adapter_promotion_gate, prepare_leakage_free_splits, AdapterPromotionDecision,

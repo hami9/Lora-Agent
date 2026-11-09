@@ -7,15 +7,15 @@ use lora_core::{
     evaluate_adapter_promotion_gate, execute_workflow_job_cancellable, format_multi_turn_prompt,
     now_epoch_ms, prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
     validate_catalog_variant, validate_specialist_handoff, validate_workflow_job,
-    verify_compensating_patch_receipt, verify_receipt_self_integrity,
-    verify_workflow_attestation_bundle, verify_workflow_receipt, AgentLimits, ApprovalDecision,
-    ApprovalPromptPort, ApprovalRequest, BrokerSingleUsePermit, BrokerVerb,
-    CatalogVariantDescriptor, ChatTurn, CompensatingPatchReceipt, ContextBudgetRequest,
-    ExecutionMode, ExtensionManifestV1, HardwareProbePort, HeldOutEvaluationReceipt,
-    LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
-    SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey, TuningProfile, TuningTrialSample,
-    WorkflowAttestationBundle, WorkflowJobConfig, WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES,
-    TERMINAL_ASCII_BANNER,
+    verify_audit_attestation_bundle, verify_compensating_patch_receipt,
+    verify_receipt_self_integrity, verify_workflow_attestation_bundle, verify_workflow_receipt,
+    AgentLimits, ApprovalDecision, ApprovalPromptPort, ApprovalRequest, AuditAttestationBundle,
+    BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor, ChatTurn,
+    CompensatingPatchReceipt, ContextBudgetRequest, ExecutionMode, ExtensionManifestV1,
+    HardwareProbePort, HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig,
+    PatchProposal, PrivilegedBrokerGate, SpecialistHandoffEnvelope, TrainingExample,
+    TuningCacheKey, TuningProfile, TuningTrialSample, WorkflowAttestationBundle, WorkflowJobConfig,
+    WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -204,6 +204,12 @@ enum Commands {
         /// Optional output file path to export a redacted JSON audit bundle
         #[arg(long)]
         export: Option<PathBuf>,
+        /// Optional output file path to export a cryptographically bound AuditAttestationBundle JSON (`lora.audit.bundle.v1`)
+        #[arg(long)]
+        export_bundle: Option<PathBuf>,
+        /// Optional path to an AuditAttestationBundle JSON file to verify
+        #[arg(long)]
+        verify_bundle: Option<PathBuf>,
         /// Optional retention cap: prune older audit records and keep at most N latest entries
         #[arg(long)]
         prune_keep: Option<usize>,
@@ -957,11 +963,40 @@ fn main() {
         Commands::Audit {
             run_id,
             export,
+            export_bundle,
+            verify_bundle,
             prune_keep,
         } => {
+            if let Some(verify_path) = verify_bundle {
+                let raw = std::fs::read_to_string(&verify_path)?;
+                let bundle: AuditAttestationBundle = serde_json::from_str(&raw).map_err(|e| {
+                    LoraError::MalformedArtifact(format!("invalid audit bundle JSON: {e}"))
+                })?;
+                verify_audit_attestation_bundle(&bundle)?;
+                println!(
+                    "Audit Attestation Bundle VERIFIED (schema_version={}, total_events={}, bundle_sha256={}).",
+                    bundle.schema_version, bundle.total_events, bundle.bundle_sha256
+                );
+                return Ok(());
+            }
             if let Some(keep) = prune_keep {
                 let pruned = app.store.prune_audit_retention(keep)?;
                 println!("Pruned {pruned} older audit record(s) (retaining up to {keep}).");
+            }
+            if let Some(bundle_path) = export_bundle {
+                let bundle = app
+                    .store
+                    .export_audit_attestation_bundle(run_id.as_deref(), None)?;
+                let json = serde_json::to_string_pretty(&bundle).map_err(|e| {
+                    LoraError::Database(format!("failed to serialize audit bundle: {e}"))
+                })?;
+                std::fs::write(&bundle_path, json)?;
+                println!(
+                    "Exported attested audit bundle to {} (events={}, bundle_sha256={}).",
+                    bundle_path.display(),
+                    bundle.total_events,
+                    bundle.bundle_sha256
+                );
             }
             if let Some(export_path) = export {
                 let bundle = app.store.export_redacted_audit_bundle(run_id.as_deref())?;

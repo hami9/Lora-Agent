@@ -262,10 +262,18 @@ fn route_request(
                 "receipt_self_verification": true,
                 "bundle_export_supported": true,
                 "cancellation_token_supported": true,
-                "patch_rollback_attestation": true
+                "patch_rollback_attestation": true,
+                "audit_bundle_export_supported": true
             });
             HttpResponse::json(&status)
         }
+        "/api/audit-bundle" => match app.store.export_audit_attestation_bundle(None, Some(50)) {
+            Ok(bundle) => HttpResponse::json(&bundle),
+            Err(e) => HttpResponse::error(
+                "500 Internal Server Error",
+                &format!("{:?}", e.reason_code()),
+            ),
+        },
         "/api/workflow-bundle" => match app.store.export_workflow_attestation_bundle(Some(20)) {
             Ok(bundle) => HttpResponse::json(&bundle),
             Err(e) => HttpResponse::error(

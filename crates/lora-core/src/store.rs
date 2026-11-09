@@ -5,6 +5,7 @@ use crate::agent::WorkflowExecutionReceipt;
 use crate::error::{redact_sensitive_text, LoraError};
 use rusqlite::{backup::Backup, params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -880,15 +881,258 @@ impl SqliteStore {
         let receipts = self.list_workflow_receipts(limit)?;
         Ok(crate::agent::build_workflow_attestation_bundle(receipts))
     }
+
+    /// Export a cryptographically bound `AuditAttestationBundle` over audit records (`docs/SECURITY_ARCHITECTURE.md`, `R17`).
+    pub fn export_audit_attestation_bundle(
+        &self,
+        run_id_filter: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<AuditAttestationBundle, LoraError> {
+        let mut events = self.list_audit_events(run_id_filter)?;
+        if let Some(lim) = limit {
+            if events.len() > lim {
+                let start = events.len() - lim;
+                events = events.split_off(start);
+            }
+        }
+        Ok(build_audit_attestation_bundle(
+            events,
+            run_id_filter.map(|s| s.to_string()),
+        ))
+    }
+}
+
+/// Cryptographically bound portable bundle of redacted audit events (`lora.audit.bundle.v1`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditAttestationBundle {
+    pub schema_version: u32,
+    pub exported_at_ms: u64,
+    pub run_id_filter: Option<String>,
+    pub total_events: usize,
+    pub events: Vec<AuditRecord>,
+    pub bundle_sha256: String,
+}
+
+fn update_len_prefixed(hasher: &mut sha2::Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// Compute a deterministic, domain-separated SHA-256 digest (`lora.audit.bundle.v1`)
+/// over an `AuditAttestationBundle` header and its ordered audit events.
+pub fn compute_audit_bundle_digest(bundle: &AuditAttestationBundle) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"lora.audit.bundle.v1\0");
+    hasher.update(bundle.schema_version.to_le_bytes());
+    hasher.update(bundle.exported_at_ms.to_le_bytes());
+    if let Some(ref r_id) = bundle.run_id_filter {
+        hasher.update([1u8]);
+        update_len_prefixed(&mut hasher, r_id.as_bytes());
+    } else {
+        hasher.update([0u8]);
+    }
+    hasher.update((bundle.total_events as u64).to_le_bytes());
+    hasher.update((bundle.events.len() as u64).to_le_bytes());
+    for ev in &bundle.events {
+        hasher.update(ev.seq.to_le_bytes());
+        update_len_prefixed(&mut hasher, ev.run_id.as_bytes());
+        update_len_prefixed(&mut hasher, ev.actor.as_bytes());
+        hasher.update(ev.policy_revision.to_le_bytes());
+        update_len_prefixed(
+            &mut hasher,
+            ev.action_digest.to_ascii_lowercase().as_bytes(),
+        );
+        update_len_prefixed(&mut hasher, ev.resource_alias.as_bytes());
+        update_len_prefixed(&mut hasher, ev.decision.as_bytes());
+        update_len_prefixed(&mut hasher, ev.outcome.as_bytes());
+        update_len_prefixed(&mut hasher, ev.summary.as_bytes());
+        hasher.update(ev.created_at_ms.to_le_bytes());
+    }
+    hex::encode(hasher.finalize())
+}
+
+/// Construct a cryptographically bound `AuditAttestationBundle` from a list of audit records.
+pub fn build_audit_attestation_bundle(
+    events: Vec<AuditRecord>,
+    run_id_filter: Option<String>,
+) -> AuditAttestationBundle {
+    let mut bundle = AuditAttestationBundle {
+        schema_version: 1,
+        exported_at_ms: now_epoch_ms(),
+        run_id_filter,
+        total_events: events.len(),
+        events,
+        bundle_sha256: String::new(),
+    };
+    bundle.bundle_sha256 = compute_audit_bundle_digest(&bundle);
+    bundle
+}
+
+/// Verify cryptographic integrity of an `AuditAttestationBundle`.
+/// Fails closed with `LoraError::DigestMismatch` or `LoraError::MalformedArtifact` on any tampering.
+pub fn verify_audit_attestation_bundle(bundle: &AuditAttestationBundle) -> Result<(), LoraError> {
+    if bundle.schema_version != 1 {
+        return Err(LoraError::MalformedArtifact(format!(
+            "unsupported audit attestation bundle schema_version {}",
+            bundle.schema_version
+        )));
+    }
+    if bundle.total_events != bundle.events.len() {
+        return Err(LoraError::DigestMismatch {
+            expected: format!("total_events={}", bundle.total_events),
+            actual: format!("events.len()={}", bundle.events.len()),
+        });
+    }
+    if let Some(ref filter) = bundle.run_id_filter {
+        for ev in &bundle.events {
+            if &ev.run_id != filter {
+                return Err(LoraError::PolicyDenied(format!(
+                    "audit event run_id mismatch in filtered bundle: expected {filter}, found {}",
+                    ev.run_id
+                )));
+            }
+        }
+    }
+    let mut prev_seq = 0i64;
+    for ev in &bundle.events {
+        if ev.seq < prev_seq {
+            return Err(LoraError::MalformedArtifact(format!(
+                "non-monotonic audit sequence detected: seq {} after {}",
+                ev.seq, prev_seq
+            )));
+        }
+        prev_seq = ev.seq;
+    }
+    let expected_sha = compute_audit_bundle_digest(bundle);
+    if !bundle.bundle_sha256.eq_ignore_ascii_case(&expected_sha) {
+        return Err(LoraError::DigestMismatch {
+            expected: expected_sha,
+            actual: bundle.bundle_sha256.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// Compute a keyed correlation digest over a sensitive short string using a per-install salt (`docs/SECURITY_ARCHITECTURE.md`).
 pub fn keyed_correlation_digest(install_key: &str, sensitive_short_value: &str) -> String {
-    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(b"lora-correlation-v1:");
     hasher.update(install_key.as_bytes());
     hasher.update(b":");
     hasher.update(sensitive_short_value.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_audit_attestation_bundle_integrity() {
+        let events = vec![
+            AuditRecord {
+                seq: 1,
+                run_id: "run-001".to_string(),
+                actor: "user".to_string(),
+                policy_revision: 1,
+                action_digest: "abcd1234abcd1234".to_string(),
+                resource_alias: "file.txt".to_string(),
+                decision: "allow".to_string(),
+                outcome: "success".to_string(),
+                summary: "read file".to_string(),
+                created_at_ms: 1000,
+            },
+            AuditRecord {
+                seq: 2,
+                run_id: "run-001".to_string(),
+                actor: "user".to_string(),
+                policy_revision: 1,
+                action_digest: "ef012345ef012345".to_string(),
+                resource_alias: "file2.txt".to_string(),
+                decision: "allow".to_string(),
+                outcome: "success".to_string(),
+                summary: "write file".to_string(),
+                created_at_ms: 2000,
+            },
+        ];
+
+        let bundle = build_audit_attestation_bundle(events, Some("run-001".to_string()));
+        assert_eq!(bundle.schema_version, 1);
+        assert_eq!(bundle.total_events, 2);
+        assert_eq!(bundle.bundle_sha256.len(), 64);
+
+        // Verification passes on untampered bundle
+        assert!(verify_audit_attestation_bundle(&bundle).is_ok());
+
+        // Tampering with an event summary fails closed
+        let mut tampered = bundle.clone();
+        tampered.events[0].summary = "tampered summary".to_string();
+        assert!(matches!(
+            verify_audit_attestation_bundle(&tampered),
+            Err(LoraError::DigestMismatch { .. })
+        ));
+
+        // Tampering with total_events fails closed
+        let mut tampered_count = bundle.clone();
+        tampered_count.total_events = 99;
+        assert!(matches!(
+            verify_audit_attestation_bundle(&tampered_count),
+            Err(LoraError::DigestMismatch { .. })
+        ));
+
+        // Non-monotonic seq fails closed
+        let mut non_monotonic = bundle.clone();
+        non_monotonic.events[1].seq = 0;
+        non_monotonic.bundle_sha256 = compute_audit_bundle_digest(&non_monotonic);
+        assert!(matches!(
+            verify_audit_attestation_bundle(&non_monotonic),
+            Err(LoraError::MalformedArtifact(_))
+        ));
+
+        // Filter mismatch fails closed
+        let mut filter_mismatch = bundle.clone();
+        filter_mismatch.events[1].run_id = "run-002".to_string();
+        filter_mismatch.bundle_sha256 = compute_audit_bundle_digest(&filter_mismatch);
+        assert!(matches!(
+            verify_audit_attestation_bundle(&filter_mismatch),
+            Err(LoraError::PolicyDenied(_))
+        ));
+    }
+
+    #[test]
+    fn test_sqlite_store_export_audit_bundle() {
+        let tmp = NamedTempFile::new().unwrap();
+        let store = SqliteStore::open(tmp.path()).unwrap();
+        store
+            .append_audit(
+                "run-audit",
+                "actor-a",
+                1,
+                "digest-1",
+                "res-1",
+                "allow",
+                "ok",
+                "test action 1",
+            )
+            .unwrap();
+        store
+            .append_audit(
+                "run-audit",
+                "actor-a",
+                1,
+                "digest-2",
+                "res-2",
+                "deny",
+                "denied",
+                "test action 2",
+            )
+            .unwrap();
+
+        let bundle = store
+            .export_audit_attestation_bundle(Some("run-audit"), None)
+            .unwrap();
+        assert_eq!(bundle.total_events, 2);
+        assert!(verify_audit_attestation_bundle(&bundle).is_ok());
+    }
 }

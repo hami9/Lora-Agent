@@ -18,8 +18,10 @@ use lora_core::{
     WorkflowExecutionReceipt, WorkflowJobConfig, DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_core::{
-    compute_patch_receipt_digest, verify_compensating_patch_receipt, verify_receipt_self_integrity,
-    verify_workflow_attestation_bundle, verify_workflow_receipt, WorkflowAttestationBundle,
+    compute_patch_receipt_digest, verify_audit_attestation_bundle,
+    verify_compensating_patch_receipt, verify_receipt_self_integrity,
+    verify_workflow_attestation_bundle, verify_workflow_receipt, AuditAttestationBundle,
+    WorkflowAttestationBundle,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -1083,6 +1085,93 @@ fn handle_http_connection(
                         "application/json",
                         &err,
                     )
+                }
+            }
+        }
+        ("GET", "/v1/audit/bundle") => {
+            let run_id = get_query_param("run_id");
+            let limit = get_query_param("limit")
+                .and_then(|l| l.parse::<usize>().ok())
+                .or(Some(50));
+            match app
+                .store
+                .export_audit_attestation_bundle(run_id.as_deref(), limit)
+            {
+                Ok(bundle) => {
+                    let body = serde_json::to_string(&bundle).unwrap_or_default();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    )
+                }
+            }
+        }
+        ("POST", "/v1/audit/bundle/verify") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let bundle_val = req_json
+                .get("bundle")
+                .cloned()
+                .unwrap_or_else(|| req_json.clone());
+            let bundle: AuditAttestationBundle = match serde_json::from_value(bundle_val) {
+                Ok(b) => b,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid audit attestation bundle: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            match verify_audit_attestation_bundle(&bundle) {
+                Ok(()) => {
+                    let body = serde_json::json!({
+                        "verified": true,
+                        "schema_version": bundle.schema_version,
+                        "total_events": bundle.total_events,
+                        "bundle_sha256": bundle.bundle_sha256,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "verified": false,
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
                 }
             }
         }

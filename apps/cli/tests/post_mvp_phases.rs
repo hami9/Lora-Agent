@@ -1691,6 +1691,8 @@ fn cli_patch_apply_with_receipt_and_rollback() {
     // 1. Apply patch and save receipt JSON
     let patch_out = Command::new(lora_bin)
         .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
             "patch",
             "--scope",
             ws.to_str().unwrap(),
@@ -1722,6 +1724,8 @@ fn cli_patch_apply_with_receipt_and_rollback() {
     // 2. Rollback using the receipt JSON restores the original file
     let rollback_out = Command::new(lora_bin)
         .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
             "rollback",
             "--scope",
             ws.to_str().unwrap(),
@@ -2665,6 +2669,8 @@ fn test_patch_containment_and_rollback_receipt_attestation() {
     // 1. Rejects path escape attempts (reserved Windows device name, traversal, secret file)
     let bad_proposal = Command::new(lora_bin)
         .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
             "patch",
             "--scope",
             ws.to_str().unwrap(),
@@ -2686,6 +2692,8 @@ fn test_patch_containment_and_rollback_receipt_attestation() {
     // 2. Normal patch application succeeds and saves attested receipt
     let patch_out = Command::new(lora_bin)
         .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
             "patch",
             "--scope",
             ws.to_str().unwrap(),
@@ -2729,6 +2737,8 @@ fn test_patch_containment_and_rollback_receipt_attestation() {
 
     let tampered_out = Command::new(lora_bin)
         .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
             "rollback",
             "--scope",
             ws.to_str().unwrap(),
@@ -2744,6 +2754,8 @@ fn test_patch_containment_and_rollback_receipt_attestation() {
     // 4. Genuine receipt rollback succeeds
     let rollback_out = Command::new(lora_bin)
         .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
             "rollback",
             "--scope",
             ws.to_str().unwrap(),
@@ -2763,4 +2775,75 @@ fn test_patch_containment_and_rollback_receipt_attestation() {
         fs::read_to_string(&file_path).unwrap(),
         "port = 8080\nenv = \"prod\"\n"
     );
+}
+
+/// `v0.2.15`: Cryptographically bound audit attestation bundle export and fail-closed verification.
+#[test]
+fn test_audit_attestation_bundle_export_and_verification() {
+    use std::fs;
+    use std::process::Command;
+
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().expect("tempdir");
+    let bundle_path = tmp.path().join("audit_bundle.json");
+
+    // 1. Export audit attestation bundle via CLI
+    let export_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "audit",
+            "--export-bundle",
+            bundle_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        export_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&export_out.stderr)
+    );
+    let stdout_exp = String::from_utf8_lossy(&export_out.stdout);
+    assert!(stdout_exp.contains("Exported attested audit bundle"));
+    assert!(bundle_path.exists());
+
+    // 2. Verify audit attestation bundle via CLI
+    let verify_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "audit",
+            "--verify-bundle",
+            bundle_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        verify_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verify_out.stderr)
+    );
+    let stdout_ver = String::from_utf8_lossy(&verify_out.stdout);
+    assert!(stdout_ver.contains("Audit Attestation Bundle VERIFIED"));
+
+    // 3. Tampered bundle fails closed
+    let raw = fs::read_to_string(&bundle_path).unwrap();
+    let mut bundle: lora_core::AuditAttestationBundle = serde_json::from_str(&raw).unwrap();
+    bundle.total_events += 1;
+    let tampered_path = tmp.path().join("tampered_audit_bundle.json");
+    fs::write(&tampered_path, serde_json::to_string(&bundle).unwrap()).unwrap();
+
+    let tampered_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "audit",
+            "--verify-bundle",
+            tampered_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!tampered_out.status.success());
+    let tampered_err = String::from_utf8_lossy(&tampered_out.stderr);
+    assert!(tampered_err.contains("DigestMismatch") || tampered_err.contains("digest mismatch"));
 }
