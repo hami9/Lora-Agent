@@ -97,9 +97,12 @@ pub use store::{
     ModelLifecycleState, ReconciliationReport, RunState, SqliteStore, CURRENT_SCHEMA_VERSION,
 };
 pub use training::{
-    evaluate_adapter_promotion_gate, prepare_leakage_free_splits, AdapterPromotionDecision,
-    AdapterStudioOutcome, DatasetSplitManifest, HeldOutEvaluationReceipt, LoraJobConfig,
-    TrainingExample,
+    compute_adapter_artifact_digest, compute_adapter_outcome_digest, compute_dataset_split_digest,
+    compute_held_out_evaluation_digest, evaluate_adapter_promotion_gate,
+    prepare_leakage_free_splits, verify_adapter_studio_outcome, verify_dataset_split_manifest,
+    verify_held_out_evaluation_receipt, AdapterPromotionDecision, AdapterStudioOutcome,
+    DatasetSplitManifest, HeldOutEvaluationReceipt, LoraJobConfig, TrainingExample,
+    ADAPTER_ARTIFACT_DOMAIN_V1, ADAPTER_EVAL_DOMAIN_V1, ADAPTER_SPLIT_DOMAIN_V1,
 };
 pub use tuning::{
     compute_tuning_receipt_digest, verify_tuning_receipt, TuningCacheKey, TuningReceipt,

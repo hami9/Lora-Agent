@@ -266,7 +266,8 @@ fn route_request(
                 "audit_bundle_export_supported": true,
                 "extension_manifest_attestation": true,
                 "policy_permit_attestation": true,
-                "tuning_receipt_attestation": true
+                "tuning_receipt_attestation": true,
+                "adapter_attestation": true
             });
             HttpResponse::json(&status)
         }

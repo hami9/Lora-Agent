@@ -8,16 +8,17 @@ use lora_core::{
     execute_workflow_job_cancellable, format_multi_turn_prompt, now_epoch_ms,
     prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
     validate_catalog_variant, validate_specialist_handoff, validate_workflow_job,
-    verify_audit_attestation_bundle, verify_compensating_patch_receipt,
+    verify_adapter_studio_outcome, verify_audit_attestation_bundle,
+    verify_compensating_patch_receipt, verify_dataset_split_manifest,
     verify_receipt_self_integrity, verify_tuning_receipt, verify_workflow_attestation_bundle,
-    verify_workflow_receipt, AgentLimits, ApprovalDecision, ApprovalPromptPort, ApprovalRequest,
-    AuditAttestationBundle, BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor, ChatTurn,
-    CompensatingPatchReceipt, ContextBudgetRequest, ExecutionMode, ExecutionPermit,
-    ExtensionManifestV1, HardwareProbePort, HeldOutEvaluationReceipt, LoraApplicationService,
-    LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate, SpecialistHandoffEnvelope,
-    TrainingExample, TuningCacheKey, TuningProfile, TuningReceipt, TuningTrialSample,
-    WorkflowAttestationBundle, WorkflowJobConfig, WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES,
-    TERMINAL_ASCII_BANNER,
+    verify_workflow_receipt, AdapterStudioOutcome, AgentLimits, ApprovalDecision,
+    ApprovalPromptPort, ApprovalRequest, AuditAttestationBundle, BrokerSingleUsePermit, BrokerVerb,
+    CatalogVariantDescriptor, ChatTurn, CompensatingPatchReceipt, ContextBudgetRequest,
+    DatasetSplitManifest, ExecutionMode, ExecutionPermit, ExtensionManifestV1, HardwareProbePort,
+    HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig, PatchProposal,
+    PrivilegedBrokerGate, SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey,
+    TuningProfile, TuningReceipt, TuningTrialSample, WorkflowAttestationBundle, WorkflowJobConfig,
+    WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -362,8 +363,8 @@ enum Commands {
     /// Validate leakage-free source-grouped dataset split and evaluate Adapter Studio promotion gate (`docs/TRAINING_SYSTEM.md`)
     Adapter {
         /// Path to JSON array of TrainingExample records
-        #[arg(long)]
-        dataset: PathBuf,
+        #[arg(long, required_unless_present_any = ["verify_manifest", "verify_outcome"])]
+        dataset: Option<PathBuf>,
         /// SPDX license identifier for the dataset (e.g. Apache-2.0, MIT, CC-BY-4.0)
         #[arg(long, default_value = "Apache-2.0")]
         license: String,
@@ -373,6 +374,12 @@ enum Commands {
         /// Optional directory to export train.json, val.json, test.json, and manifest.json
         #[arg(long)]
         out_dir: Option<PathBuf>,
+        /// Optional path to a DatasetSplitManifest JSON file to verify cryptographic binding
+        #[arg(long)]
+        verify_manifest: Option<PathBuf>,
+        /// Optional path to an AdapterStudioOutcome JSON file to verify promotion gate binding
+        #[arg(long)]
+        verify_outcome: Option<PathBuf>,
     },
 
     /// Validate an external catalog variant descriptor before resumable download (`docs/MODEL_MANAGEMENT.md`)
@@ -1398,8 +1405,66 @@ fn main() {
             license,
             base_model,
             out_dir,
+            verify_manifest,
+            verify_outcome,
         } => {
-            let raw = std::fs::read_to_string(&dataset)?;
+            if let Some(ref vm) = verify_manifest {
+                let raw = std::fs::read_to_string(vm).map_err(|e| {
+                    LoraError::MalformedArtifact(format!("cannot read split manifest: {e}"))
+                })?;
+                let manifest: DatasetSplitManifest = serde_json::from_str(&raw).map_err(|e| {
+                    LoraError::MalformedArtifact(format!("invalid split manifest json: {e}"))
+                })?;
+                verify_dataset_split_manifest(&manifest)?;
+                println!("Dataset SHA-256   : {}", manifest.dataset_sha256);
+                println!("Dataset license   : {}", manifest.license);
+                println!(
+                    "Splits (tr/va/te) : {}/{}/{} examples",
+                    manifest.train_examples.len(),
+                    manifest.validation_examples.len(),
+                    manifest.test_examples.len()
+                );
+                println!(
+                    "Groups (tr/va/te) : {}/{}/{} groups",
+                    manifest.train_groups.len(),
+                    manifest.validation_groups.len(),
+                    manifest.test_groups.len()
+                );
+                println!(
+                    "Attestation digest: {}",
+                    manifest.manifest_sha256.as_deref().unwrap_or("none")
+                );
+                println!("Integrity status  : Verified Bound (lora.adapter.split.v1)");
+                return Ok(());
+            }
+
+            if let Some(ref vo) = verify_outcome {
+                let raw = std::fs::read_to_string(vo).map_err(|e| {
+                    LoraError::MalformedArtifact(format!("cannot read outcome file: {e}"))
+                })?;
+                let outcome: AdapterStudioOutcome = serde_json::from_str(&raw).map_err(|e| {
+                    LoraError::MalformedArtifact(format!("invalid adapter outcome json: {e}"))
+                })?;
+                verify_adapter_studio_outcome(&outcome)?;
+                println!("Job ID            : {}", outcome.job_id);
+                println!("Adapter SHA-256   : {}", outcome.adapter_sha256);
+                println!("Base model digest : {}", outcome.base_model_sha256);
+                println!("Decision          : {:?}", outcome.decision);
+                println!("Reason            : {}", outcome.reason);
+                println!(
+                    "Outcome digest    : {}",
+                    outcome.outcome_sha256.as_deref().unwrap_or("none")
+                );
+                println!("Integrity status  : Verified Bound (lora.adapter.eval.v1)");
+                return Ok(());
+            }
+
+            let ds_path = dataset.ok_or_else(|| {
+                LoraError::MalformedArtifact(
+                    "--dataset is required when generating splits".to_string(),
+                )
+            })?;
+            let raw = std::fs::read_to_string(&ds_path)?;
             let examples: Vec<TrainingExample> = serde_json::from_str(&raw)
                 .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
             let split = prepare_leakage_free_splits(&examples, &license)?;
@@ -1420,6 +1485,10 @@ fn main() {
                 println!("Exported splits to: {}", out.display());
             }
             println!("Dataset SHA-256  : {}", split.dataset_sha256);
+            println!(
+                "Split attestation: {}",
+                split.manifest_sha256.as_deref().unwrap_or("none")
+            );
             println!(
                 "Splits (tr/va/te): {}/{}/{} examples",
                 split.train_examples.len(),
@@ -1456,11 +1525,16 @@ fn main() {
                         general_regression_pct: 0,
                         schema_valid_pct: 100,
                         target_runtime_load_verified: true,
+                        receipt_sha256: None,
                     },
                 )?;
                 println!(
                     "Promotion gate   : {:?} ({})",
                     outcome.decision, outcome.reason
+                );
+                println!(
+                    "Outcome digest   : {}",
+                    outcome.outcome_sha256.as_deref().unwrap_or("none")
                 );
             }
             Ok(())

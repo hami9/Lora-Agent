@@ -475,6 +475,7 @@ fn phase8_adapter_studio_leakage_free_split_and_promotion_gate() {
             general_regression_pct: 0,
             schema_valid_pct: 100,
             target_runtime_load_verified: true,
+            receipt_sha256: None,
         },
     )
     .is_err());
@@ -489,6 +490,7 @@ fn phase8_adapter_studio_leakage_free_split_and_promotion_gate() {
             general_regression_pct: 1,
             schema_valid_pct: 100,
             target_runtime_load_verified: true,
+            receipt_sha256: None,
         },
     )
     .unwrap();
@@ -507,6 +509,7 @@ fn phase8_adapter_studio_leakage_free_split_and_promotion_gate() {
             general_regression_pct: 4,
             schema_valid_pct: 100,
             target_runtime_load_verified: true,
+            receipt_sha256: None,
         },
     )
     .unwrap();
@@ -3115,4 +3118,106 @@ fn test_tuning_receipt_attestation_and_verification_cli() {
     assert!(!out_bad.status.success());
     let err_txt = String::from_utf8_lossy(&out_bad.stderr);
     assert!(err_txt.contains("tuning receipt digest mismatch"));
+}
+
+/// `v0.2.18`: Adapter split manifest and outcome cryptographic attestation CLI.
+#[test]
+fn test_adapter_split_manifest_and_outcome_attestation_cli() {
+    use std::fs;
+    use std::process::Command;
+
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().expect("tempdir");
+
+    // 1. Export splits and verify manifest via CLI
+    let dataset_file = tmp.path().join("dataset.json");
+    let examples = vec![
+        lora_core::TrainingExample {
+            example_id: "ex_1".to_string(),
+            source_group_id: "doc_alpha".to_string(),
+            prompt: "Summarize Alpha".to_string(),
+            target_completion: "Alpha summary".to_string(),
+        },
+        lora_core::TrainingExample {
+            example_id: "ex_2".to_string(),
+            source_group_id: "doc_beta".to_string(),
+            prompt: "Summarize Beta".to_string(),
+            target_completion: "Beta summary".to_string(),
+        },
+        lora_core::TrainingExample {
+            example_id: "ex_3".to_string(),
+            source_group_id: "doc_gamma".to_string(),
+            prompt: "Summarize Gamma".to_string(),
+            target_completion: "Gamma summary".to_string(),
+        },
+    ];
+    fs::write(&dataset_file, serde_json::to_string(&examples).unwrap()).unwrap();
+
+    let out_dir = tmp.path().join("splits");
+    let out_gen = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "adapter",
+            "--dataset",
+            dataset_file.to_str().unwrap(),
+            "--out-dir",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out_gen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out_gen.stderr)
+    );
+    let gen_txt = String::from_utf8_lossy(&out_gen.stdout);
+    assert!(gen_txt.contains("Split attestation:"));
+
+    let manifest_path = out_dir.join("manifest.json");
+    assert!(manifest_path.exists());
+
+    // 2. Verify manifest via --verify-manifest
+    let out_vm = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "adapter",
+            "--verify-manifest",
+            manifest_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out_vm.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out_vm.stderr)
+    );
+    let vm_txt = String::from_utf8_lossy(&out_vm.stdout);
+    assert!(vm_txt.contains("Verified Bound (lora.adapter.split.v1)"));
+
+    // 3. Tampering manifest fails verification
+    let mut bad_manifest: lora_core::DatasetSplitManifest =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    bad_manifest.manifest_sha256 = Some("0".repeat(64));
+    let bad_manifest_path = tmp.path().join("bad_manifest.json");
+    fs::write(
+        &bad_manifest_path,
+        serde_json::to_string(&bad_manifest).unwrap(),
+    )
+    .unwrap();
+
+    let out_bad = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "adapter",
+            "--verify-manifest",
+            bad_manifest_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!out_bad.status.success());
+    let err_txt = String::from_utf8_lossy(&out_bad.stderr);
+    assert!(err_txt.contains("dataset split manifest digest mismatch"));
 }
