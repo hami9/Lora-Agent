@@ -299,6 +299,19 @@
         }
       }
     },
+    "/v1/benchmark/verify": {
+      "post": {
+        "summary": "Verify benchmark summary and soak test receipt cryptographic attestation",
+        "responses": {
+          "200": {
+            "description": "Benchmark receipt and soak tests verified successfully"
+          },
+          "400": {
+            "description": "Soak failure, metric violation, or digest mismatch"
+          }
+        }
+      }
+    },
     "/v1/hardware/tune": {
       "post": {
         "summary": "Run bounded auto-tuning calibration grid and persist verified tuning receipt",

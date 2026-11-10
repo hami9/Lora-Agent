@@ -8,12 +8,24 @@ use crate::policy::ExecutionMode;
 use crate::LoraApplicationService;
 use lora_protocol::PINNED_LLAMA_CPP_REVISION;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Domain separation prefix for soak test receipt attestation (`docs/BENCHMARK_PLAN.md`, `docs/PERFORMANCE_STRATEGY.md`).
+pub const SOAK_TEST_DOMAIN_V1: &[u8] = b"lora.soak.receipt.v1\0";
+
+/// Domain separation prefix for benchmark summary receipt attestation (`docs/BENCHMARK_PLAN.md`, `T9`).
+pub const BENCHMARK_RECEIPT_DOMAIN_V1: &[u8] = b"lora.benchmark.receipt.v1\0";
+
+fn update_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BenchmarkSample {
@@ -43,6 +55,40 @@ pub struct SoakTestReceipt {
     pub max_rss_growth_bytes: u64,
     pub all_terminal_outcomes_valid: bool,
     pub passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_sha256: Option<String>,
+}
+
+/// Compute a domain-separated canonical SHA-256 digest over a SoakTestReceipt (`lora.soak.receipt.v1`).
+pub fn compute_soak_receipt_digest(soak: &SoakTestReceipt) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(SOAK_TEST_DOMAIN_V1);
+    hasher.update(soak.cycles_completed.to_le_bytes());
+    hasher.update(soak.warmup_rss_bytes.to_le_bytes());
+    hasher.update(soak.final_rss_bytes.to_le_bytes());
+    hasher.update(soak.max_rss_growth_bytes.to_le_bytes());
+    hasher.update([soak.all_terminal_outcomes_valid as u8]);
+    hasher.update([soak.passed as u8]);
+    hex::encode(hasher.finalize())
+}
+
+/// Verify that a SoakTestReceipt passed soak invariants and matches its cryptographic digest.
+pub fn verify_soak_test_receipt(soak: &SoakTestReceipt) -> Result<(), LoraError> {
+    if !soak.passed || !soak.all_terminal_outcomes_valid {
+        return Err(LoraError::PolicyDenied(
+            "soak test receipt did not pass all cycle or outcome invariants".to_string(),
+        ));
+    }
+    let expected = compute_soak_receipt_digest(soak);
+    match &soak.receipt_sha256 {
+        Some(digest) if digest == &expected => Ok(()),
+        Some(mismatch) => Err(LoraError::PolicyDenied(format!(
+            "soak test receipt digest mismatch: expected {expected}, got {mismatch}"
+        ))),
+        None => Err(LoraError::MalformedArtifact(
+            "soak test receipt missing cryptographic digest".to_string(),
+        )),
+    }
 }
 
 /// Anonymized, machine-readable benchmark receipt (`docs/BENCHMARK_PLAN.md`).
@@ -61,6 +107,69 @@ pub struct BenchmarkReceipt {
     pub soak_receipt: SoakTestReceipt,
     pub raw_samples: Vec<BenchmarkSample>,
     pub residual_risks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_sha256: Option<String>,
+}
+
+/// Compute a domain-separated canonical SHA-256 digest over a BenchmarkReceipt (`lora.benchmark.receipt.v1`).
+pub fn compute_benchmark_receipt_digest(receipt: &BenchmarkReceipt) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(BENCHMARK_RECEIPT_DOMAIN_V1);
+    update_len_prefixed(&mut hasher, receipt.case_id.as_bytes());
+    update_len_prefixed(&mut hasher, receipt.model_sha256.as_bytes());
+    update_len_prefixed(&mut hasher, receipt.pinned_worker_revision.as_bytes());
+    update_len_prefixed(&mut hasher, receipt.os_arch.as_bytes());
+
+    hasher.update((receipt.cpu_isa_features.len() as u64).to_le_bytes());
+    for f in &receipt.cpu_isa_features {
+        update_len_prefixed(&mut hasher, f.as_bytes());
+    }
+
+    hasher.update(receipt.context_length.to_le_bytes());
+    hasher.update(receipt.warmup_runs.to_le_bytes());
+    hasher.update(receipt.measured_runs.to_le_bytes());
+
+    // Hash ttft stats
+    hasher.update((receipt.ttft_us_stats.count as u64).to_le_bytes());
+    hasher.update(receipt.ttft_us_stats.median.to_le_bytes());
+    hasher.update(receipt.ttft_us_stats.min.to_le_bytes());
+    hasher.update(receipt.ttft_us_stats.max.to_le_bytes());
+
+    // Hash duration stats
+    hasher.update((receipt.duration_us_stats.count as u64).to_le_bytes());
+    hasher.update(receipt.duration_us_stats.median.to_le_bytes());
+    hasher.update(receipt.duration_us_stats.min.to_le_bytes());
+    hasher.update(receipt.duration_us_stats.max.to_le_bytes());
+
+    // Hash soak digest
+    let soak_digest = compute_soak_receipt_digest(&receipt.soak_receipt);
+    update_len_prefixed(&mut hasher, soak_digest.as_bytes());
+
+    // Hash raw sample count
+    hasher.update((receipt.raw_samples.len() as u64).to_le_bytes());
+
+    hex::encode(hasher.finalize())
+}
+
+/// Verify that a BenchmarkReceipt passed soak tests and matches its cryptographic attestation digest.
+pub fn verify_benchmark_receipt(receipt: &BenchmarkReceipt) -> Result<(), LoraError> {
+    if !receipt.soak_receipt.passed {
+        return Err(LoraError::PolicyDenied(
+            "benchmark receipt indicates soak test failure".to_string(),
+        ));
+    }
+    verify_soak_test_receipt(&receipt.soak_receipt)?;
+
+    let expected = compute_benchmark_receipt_digest(receipt);
+    match &receipt.receipt_sha256 {
+        Some(digest) if digest == &expected => Ok(()),
+        Some(mismatch) => Err(LoraError::PolicyDenied(format!(
+            "benchmark receipt digest mismatch: expected {expected}, got {mismatch}"
+        ))),
+        None => Err(LoraError::MalformedArtifact(
+            "benchmark receipt missing cryptographic digest".to_string(),
+        )),
+    }
 }
 
 pub fn compute_stats(mut values: Vec<u64>) -> MetricStats {
@@ -329,7 +438,18 @@ impl LoraApplicationService {
         let max_rss_growth_bytes = max_rss_bytes.saturating_sub(warmup_rss_bytes);
         let soak_passed = all_valid && max_rss_growth_bytes <= 16 * 1024 * 1024;
 
-        let receipt = BenchmarkReceipt {
+        let mut soak = SoakTestReceipt {
+            cycles_completed: effective_soak_cycles,
+            warmup_rss_bytes,
+            final_rss_bytes,
+            max_rss_growth_bytes,
+            all_terminal_outcomes_valid: all_valid,
+            passed: soak_passed,
+            receipt_sha256: None,
+        };
+        soak.receipt_sha256 = Some(compute_soak_receipt_digest(&soak));
+
+        let mut receipt = BenchmarkReceipt {
             case_id: "bench-short-128-cpu".to_string(),
             model_sha256,
             pinned_worker_revision: PINNED_LLAMA_CPP_REVISION.to_string(),
@@ -340,20 +460,15 @@ impl LoraApplicationService {
             measured_runs,
             ttft_us_stats: compute_stats(measured_ttft),
             duration_us_stats: compute_stats(measured_dur),
-            soak_receipt: SoakTestReceipt {
-                cycles_completed: effective_soak_cycles,
-                warmup_rss_bytes,
-                final_rss_bytes,
-                max_rss_growth_bytes,
-                all_terminal_outcomes_valid: all_valid,
-                passed: soak_passed,
-            },
+            soak_receipt: soak,
             raw_samples,
             residual_risks: vec![
                 "GPU backends remain labeled unqualified until physical driver/device smoke tests are recorded.".to_string(),
                 "Energy counter (package_power_watts) is unavailable without elevated OS privileges.".to_string(),
             ],
+            receipt_sha256: None,
         };
+        receipt.receipt_sha256 = Some(compute_benchmark_receipt_digest(&receipt));
 
         // Write `receipts.jsonl` and `summary.json`
         let jsonl_path = output_dir.join("receipts.jsonl");
@@ -370,5 +485,93 @@ impl LoraApplicationService {
         fs::write(&summary_path, summary_json)?;
 
         Ok(receipt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_soak_receipt_attestation_and_verification() {
+        let mut soak = SoakTestReceipt {
+            cycles_completed: 30,
+            warmup_rss_bytes: 64 * 1024 * 1024,
+            final_rss_bytes: 66 * 1024 * 1024,
+            max_rss_growth_bytes: 2 * 1024 * 1024,
+            all_terminal_outcomes_valid: true,
+            passed: true,
+            receipt_sha256: None,
+        };
+        let digest = compute_soak_receipt_digest(&soak);
+        assert_eq!(digest.len(), 64);
+        soak.receipt_sha256 = Some(digest);
+        assert!(verify_soak_test_receipt(&soak).is_ok());
+
+        // Failed soak check fails
+        let mut failed = soak.clone();
+        failed.passed = false;
+        assert!(verify_soak_test_receipt(&failed).is_err());
+
+        // Mismatched digest fails
+        let mut tampered = soak.clone();
+        tampered.max_rss_growth_bytes = 100 * 1024 * 1024;
+        assert!(verify_soak_test_receipt(&tampered).is_err());
+    }
+
+    #[test]
+    fn test_benchmark_receipt_attestation_and_verification() {
+        let mut soak = SoakTestReceipt {
+            cycles_completed: 30,
+            warmup_rss_bytes: 64 * 1024 * 1024,
+            final_rss_bytes: 66 * 1024 * 1024,
+            max_rss_growth_bytes: 2 * 1024 * 1024,
+            all_terminal_outcomes_valid: true,
+            passed: true,
+            receipt_sha256: None,
+        };
+        soak.receipt_sha256 = Some(compute_soak_receipt_digest(&soak));
+
+        let mut receipt = BenchmarkReceipt {
+            case_id: "bench-short-128-cpu".to_string(),
+            model_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            pinned_worker_revision: PINNED_LLAMA_CPP_REVISION.to_string(),
+            os_arch: "windows/x86_64".to_string(),
+            cpu_isa_features: vec!["avx2".to_string(), "fma".to_string()],
+            context_length: 2048,
+            warmup_runs: 2,
+            measured_runs: 10,
+            ttft_us_stats: MetricStats {
+                count: 10,
+                median: 50_000,
+                min: 40_000,
+                max: 60_000,
+            },
+            duration_us_stats: MetricStats {
+                count: 10,
+                median: 120_000,
+                min: 110_000,
+                max: 130_000,
+            },
+            soak_receipt: soak,
+            raw_samples: Vec::new(),
+            residual_risks: vec!["No GPU tested".to_string()],
+            receipt_sha256: None,
+        };
+        let digest = compute_benchmark_receipt_digest(&receipt);
+        assert_eq!(digest.len(), 64);
+        receipt.receipt_sha256 = Some(digest);
+        assert!(verify_benchmark_receipt(&receipt).is_ok());
+
+        // Failed soak inside benchmark fails
+        let mut failed = receipt.clone();
+        failed.soak_receipt.passed = false;
+        assert!(verify_benchmark_receipt(&failed).is_err());
+
+        // Tampered latency stats fails
+        let mut tampered = receipt.clone();
+        tampered.ttft_us_stats.median = 1;
+        assert!(verify_benchmark_receipt(&tampered).is_err());
     }
 }

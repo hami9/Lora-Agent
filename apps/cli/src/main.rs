@@ -8,12 +8,12 @@ use lora_core::{
     execute_workflow_job_cancellable, format_multi_turn_prompt, now_epoch_ms,
     prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
     validate_catalog_variant, validate_specialist_handoff, validate_workflow_job,
-    verify_adapter_studio_outcome, verify_audit_attestation_bundle,
+    verify_adapter_studio_outcome, verify_audit_attestation_bundle, verify_benchmark_receipt,
     verify_compensating_patch_receipt, verify_dataset_split_manifest, verify_qualification_report,
     verify_receipt_self_integrity, verify_rollback_drill_receipt, verify_tuning_receipt,
     verify_workflow_attestation_bundle, verify_workflow_receipt, AdapterStudioOutcome, AgentLimits,
     ApprovalDecision, ApprovalPromptPort, ApprovalRequest, AuditAttestationBundle,
-    BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor, ChatTurn,
+    BenchmarkReceipt, BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor, ChatTurn,
     CompensatingPatchReceipt, ContextBudgetRequest, DatasetSplitManifest, ExecutionMode,
     ExecutionPermit, ExtensionManifestV1, HardwareProbePort, HeldOutEvaluationReceipt,
     LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
@@ -249,10 +249,10 @@ enum Commands {
     Benchmark {
         /// Model alias, revision ID, or SHA-256 digest
         #[arg(long)]
-        model: String,
+        model: Option<String>,
         /// Directory to store anonymized `receipts.jsonl` and `summary.json`
         #[arg(long)]
-        output_dir: PathBuf,
+        output_dir: Option<PathBuf>,
         /// Number of warm-up iterations
         #[arg(long, default_value_t = 2)]
         warmup: u32,
@@ -262,6 +262,9 @@ enum Commands {
         /// Number of load/generate/unload soak cycles
         #[arg(long, default_value_t = 30)]
         soak_cycles: u32,
+        /// Verify benchmark summary receipt JSON artifact cryptographic attestation
+        #[arg(long)]
+        verify_summary: Option<PathBuf>,
     },
 
     /// Run T10 / M8 release qualification, producing support matrix, SBOM notices, update/rollback drill, and SHA256SUMS
@@ -574,6 +577,18 @@ fn save_chat_history(
 }
 
 fn main() {
+    let builder = std::thread::Builder::new()
+        .name("lora-main".to_string())
+        .stack_size(8 * 1024 * 1024);
+
+    let handle = builder.spawn(run_cli).expect("spawn lora-main thread");
+
+    if handle.join().is_err() {
+        std::process::exit(1);
+    }
+}
+
+fn run_cli() {
     let cli = Cli::parse();
 
     if matches!(&cli.command, Commands::Banner) {
@@ -1150,9 +1165,38 @@ fn main() {
             warmup,
             measured,
             soak_cycles,
+            verify_summary,
         } => {
-            let receipt =
-                app.run_benchmark_and_soak(&model, warmup, measured, soak_cycles, &output_dir)?;
+            if let Some(path) = verify_summary {
+                let bytes = std::fs::read(path).map_err(|e| LoraError::Io(e.to_string()))?;
+                let receipt: BenchmarkReceipt = serde_json::from_slice(&bytes)
+                    .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
+                verify_benchmark_receipt(&receipt)?;
+                println!(
+                    "Benchmark summary verified: case={} model={} soak_passed={} digest={}",
+                    receipt.case_id,
+                    receipt.model_sha256,
+                    receipt.soak_receipt.passed,
+                    receipt.receipt_sha256.as_deref().unwrap_or("none")
+                );
+                return Ok(());
+            }
+            let (model_id, out_dir) = match (model, output_dir) {
+                (Some(m), Some(o)) => (m, o),
+                _ => {
+                    return Err(LoraError::PolicyDenied(
+                        "either --verify-summary or both --model and --output-dir must be provided"
+                            .to_string(),
+                    ));
+                }
+            };
+            let receipt = app.run_benchmark_and_soak(
+                model_id.as_str(),
+                warmup,
+                measured,
+                soak_cycles,
+                out_dir.as_path(),
+            )?;
             println!("Case ID        : {}", receipt.case_id);
             println!("Model SHA-256  : {}", receipt.model_sha256);
             println!(
@@ -1163,12 +1207,21 @@ fn main() {
                 receipt.ttft_us_stats.count
             );
             println!(
-                "Soak ({} cycles): passed={} (max_rss_growth={} B)",
+                "Soak ({} cycles): passed={} (max_rss_growth={} B, attestation: {})",
                 receipt.soak_receipt.cycles_completed,
                 receipt.soak_receipt.passed,
-                receipt.soak_receipt.max_rss_growth_bytes
+                receipt.soak_receipt.max_rss_growth_bytes,
+                receipt
+                    .soak_receipt
+                    .receipt_sha256
+                    .as_deref()
+                    .unwrap_or("none")
             );
-            println!("Saved receipts : {}", output_dir.display());
+            println!(
+                "Summary attestation : {}",
+                receipt.receipt_sha256.as_deref().unwrap_or("none")
+            );
+            println!("Saved receipts : {}", out_dir.display());
             Ok(())
         }
         Commands::Qualify {

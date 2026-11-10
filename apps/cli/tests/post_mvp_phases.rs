@@ -3343,3 +3343,103 @@ fn test_qualification_report_and_rollback_drill_attestation_cli() {
         .unwrap();
     assert!(!bad_report_out.status.success());
 }
+
+/// `v0.2.20`: Benchmark summary and soak test cryptographic attestation CLI.
+#[test]
+fn test_benchmark_summary_and_soak_attestation_cli() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+
+    let mut soak = lora_core::SoakTestReceipt {
+        cycles_completed: 30,
+        warmup_rss_bytes: 64 * 1024 * 1024,
+        final_rss_bytes: 66 * 1024 * 1024,
+        max_rss_growth_bytes: 2 * 1024 * 1024,
+        all_terminal_outcomes_valid: true,
+        passed: true,
+        receipt_sha256: None,
+    };
+    soak.receipt_sha256 = Some(lora_core::compute_soak_receipt_digest(&soak));
+    assert!(lora_core::verify_soak_test_receipt(&soak).is_ok());
+
+    let mut receipt = lora_core::BenchmarkReceipt {
+        case_id: "bench-cli-verify".to_string(),
+        model_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .to_string(),
+        pinned_worker_revision: lora_protocol::PINNED_LLAMA_CPP_REVISION.to_string(),
+        os_arch: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+        cpu_isa_features: vec!["avx2".to_string()],
+        context_length: 2048,
+        warmup_runs: 2,
+        measured_runs: 10,
+        ttft_us_stats: lora_core::MetricStats {
+            count: 10,
+            median: 45_000,
+            min: 35_000,
+            max: 55_000,
+        },
+        duration_us_stats: lora_core::MetricStats {
+            count: 10,
+            median: 110_000,
+            min: 100_000,
+            max: 120_000,
+        },
+        soak_receipt: soak,
+        raw_samples: Vec::new(),
+        residual_risks: vec!["CPU baseline only".to_string()],
+        receipt_sha256: None,
+    };
+    receipt.receipt_sha256 = Some(lora_core::compute_benchmark_receipt_digest(&receipt));
+    assert!(lora_core::verify_benchmark_receipt(&receipt).is_ok());
+
+    let summary_path = tmp.path().join("summary.json");
+    fs::write(
+        &summary_path,
+        serde_json::to_string_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
+
+    // 1. Verify valid benchmark summary via CLI
+    let bench_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "benchmark",
+            "--verify-summary",
+            summary_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        bench_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bench_out.stderr)
+    );
+    let bench_stdout = String::from_utf8_lossy(&bench_out.stdout);
+    assert!(bench_stdout.contains("Benchmark summary verified:"));
+    assert!(bench_stdout.contains("soak_passed=true"));
+
+    // 2. Tampered benchmark summary fails closed
+    let mut bad_receipt = receipt.clone();
+    bad_receipt.ttft_us_stats.median = 999;
+    let bad_summary_path = tmp.path().join("bad_summary.json");
+    fs::write(
+        &bad_summary_path,
+        serde_json::to_string_pretty(&bad_receipt).unwrap(),
+    )
+    .unwrap();
+
+    let bad_bench_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "benchmark",
+            "--verify-summary",
+            bad_summary_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!bad_bench_out.status.success());
+    let err_txt = String::from_utf8_lossy(&bad_bench_out.stderr);
+    assert!(err_txt.contains("benchmark receipt digest mismatch"));
+}

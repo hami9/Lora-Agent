@@ -149,7 +149,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "64",
+            "66",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -1076,6 +1076,64 @@ fn loopback_api_live_tcp_socket_e2e() {
     ));
     assert!(r64.starts_with("HTTP/1.1 400 Bad Request"));
     assert!(r64.contains("\"verified\":false"));
+
+    // (bj) POST /v1/benchmark/verify verifies valid benchmark summary receipt
+    let mut bench_soak = lora_core::SoakTestReceipt {
+        cycles_completed: 30,
+        warmup_rss_bytes: 64 * 1024 * 1024,
+        final_rss_bytes: 66 * 1024 * 1024,
+        max_rss_growth_bytes: 2 * 1024 * 1024,
+        all_terminal_outcomes_valid: true,
+        passed: true,
+        receipt_sha256: None,
+    };
+    bench_soak.receipt_sha256 = Some(lora_core::compute_soak_receipt_digest(&bench_soak));
+    let mut bench_rcpt = lora_core::BenchmarkReceipt {
+        case_id: "bench-api-test".to_string(),
+        model_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .to_string(),
+        pinned_worker_revision: lora_protocol::PINNED_LLAMA_CPP_REVISION.to_string(),
+        os_arch: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+        cpu_isa_features: vec!["avx2".to_string()],
+        context_length: 2048,
+        warmup_runs: 2,
+        measured_runs: 10,
+        ttft_us_stats: lora_core::MetricStats {
+            count: 10,
+            median: 50_000,
+            min: 40_000,
+            max: 60_000,
+        },
+        duration_us_stats: lora_core::MetricStats {
+            count: 10,
+            median: 120_000,
+            min: 110_000,
+            max: 130_000,
+        },
+        soak_receipt: bench_soak,
+        raw_samples: Vec::new(),
+        residual_risks: vec!["CPU baseline only".to_string()],
+        receipt_sha256: None,
+    };
+    bench_rcpt.receipt_sha256 = Some(lora_core::compute_benchmark_receipt_digest(&bench_rcpt));
+    let body_bench_ok = serde_json::to_string(&bench_rcpt).unwrap();
+    let r65 = send_http(&format!(
+        "POST /v1/benchmark/verify HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_bench_ok}",
+        body_bench_ok.len()
+    ));
+    assert!(r65.starts_with("HTTP/1.1 200 OK"));
+    assert!(r65.contains("\"verified\":true"));
+    assert!(r65.contains("\"case_id\":\"bench-api-test\""));
+
+    // (bk) POST /v1/benchmark/verify rejects tampered benchmark summary
+    bench_rcpt.ttft_us_stats.median = 999;
+    let body_bench_bad = serde_json::to_string(&bench_rcpt).unwrap();
+    let r66 = send_http(&format!(
+        "POST /v1/benchmark/verify HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_bench_bad}",
+        body_bench_bad.len()
+    ));
+    assert!(r66.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(r66.contains("\"verified\":false"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());

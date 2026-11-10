@@ -268,7 +268,8 @@ fn route_request(
                 "policy_permit_attestation": true,
                 "tuning_receipt_attestation": true,
                 "adapter_attestation": true,
-                "qualification_attestation": true
+                "qualification_attestation": true,
+                "benchmark_attestation": true
             });
             HttpResponse::json(&status)
         }

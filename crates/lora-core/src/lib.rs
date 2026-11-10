@@ -43,9 +43,11 @@ pub use api_gateway::{
     ProviderRetryDecision, SseEventFrame, SseReplayResult,
 };
 pub use benchmark::{
-    anonymize_public_benchmark_report, compute_stats, compute_unified_memory_budget,
-    verify_benchmark_comparison_controls, BenchmarkComparisonControl, BenchmarkReceipt,
-    BenchmarkSample, MetricStats, SoakTestReceipt, StageLatencyProfile,
+    anonymize_public_benchmark_report, compute_benchmark_receipt_digest,
+    compute_soak_receipt_digest, compute_stats, compute_unified_memory_budget,
+    verify_benchmark_comparison_controls, verify_benchmark_receipt, verify_soak_test_receipt,
+    BenchmarkComparisonControl, BenchmarkReceipt, BenchmarkSample, MetricStats, SoakTestReceipt,
+    StageLatencyProfile, BENCHMARK_RECEIPT_DOMAIN_V1, SOAK_TEST_DOMAIN_V1,
 };
 pub use broker::{BrokerSingleUsePermit, BrokerStatus, BrokerVerb, PrivilegedBrokerGate};
 pub use catalog::{
