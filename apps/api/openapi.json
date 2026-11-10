@@ -247,6 +247,58 @@
         }
       }
     },
+    "/v1/adapter/split/verify": {
+      "post": {
+        "summary": "Verify cryptographic integrity and leakage-free invariants of a dataset split manifest",
+        "responses": {
+          "200": {
+            "description": "Manifest verified successfully with dataset and manifest digests"
+          },
+          "400": {
+            "description": "Malformed manifest, leakage detected, or digest mismatch"
+          }
+        }
+      }
+    },
+    "/v1/adapter/evaluation/verify": {
+      "post": {
+        "summary": "Verify cryptographic integrity of an adapter outcome or held-out evaluation receipt",
+        "responses": {
+          "200": {
+            "description": "Evaluation or outcome verified successfully"
+          },
+          "400": {
+            "description": "Malformed evaluation or digest mismatch"
+          }
+        }
+      }
+    },
+    "/v1/qualify/verify-report": {
+      "post": {
+        "summary": "Verify release qualification report cryptographic attestation and air-gapped safety invariants",
+        "responses": {
+          "200": {
+            "description": "Qualification report verified with release and digest details"
+          },
+          "400": {
+            "description": "Milestone failure, network violation, or digest mismatch"
+          }
+        }
+      }
+    },
+    "/v1/qualify/verify-drill": {
+      "post": {
+        "summary": "Verify update and rollback drill receipt cryptographic attestation",
+        "responses": {
+          "200": {
+            "description": "Rollback drill receipt verified successfully"
+          },
+          "400": {
+            "description": "Drill failure or digest mismatch"
+          }
+        }
+      }
+    },
     "/v1/hardware/tune": {
       "post": {
         "summary": "Run bounded auto-tuning calibration grid and persist verified tuning receipt",

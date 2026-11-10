@@ -22,6 +22,7 @@ use lora_core::{
 };
 use lora_platform::OsScopedFileExecutor;
 use std::fs;
+use std::process::Command;
 use tempfile::TempDir;
 
 #[test]
@@ -3220,4 +3221,125 @@ fn test_adapter_split_manifest_and_outcome_attestation_cli() {
     assert!(!out_bad.status.success());
     let err_txt = String::from_utf8_lossy(&out_bad.stderr);
     assert!(err_txt.contains("dataset split manifest digest mismatch"));
+}
+
+/// `v0.2.19`: Release qualification report and update/rollback drill cryptographic attestation CLI.
+#[test]
+fn test_qualification_report_and_rollback_drill_attestation_cli() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+
+    // 1. Run rollback drill directly and check attestation
+    let drill = lora_core::run_update_and_rollback_drill(tmp.path()).unwrap();
+    assert!(drill.passed);
+    assert!(drill.receipt_sha256.is_some());
+    assert!(lora_core::verify_rollback_drill_receipt(&drill).is_ok());
+
+    let drill_path = tmp.path().join("drill_receipt.json");
+    fs::write(&drill_path, serde_json::to_string_pretty(&drill).unwrap()).unwrap();
+
+    // 2. Verify drill receipt via CLI
+    let drill_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "qualify",
+            "--verify-drill",
+            drill_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        drill_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&drill_out.stderr)
+    );
+    let drill_stdout = String::from_utf8_lossy(&drill_out.stdout);
+    assert!(drill_stdout.contains("Rollback drill receipt verified:"));
+    assert!(drill_stdout.contains("passed=true"));
+
+    // 3. Tampering with drill receipt fails CLI verification
+    let mut bad_drill = drill.clone();
+    bad_drill.passed = false;
+    let bad_drill_path = tmp.path().join("bad_drill.json");
+    fs::write(
+        &bad_drill_path,
+        serde_json::to_string_pretty(&bad_drill).unwrap(),
+    )
+    .unwrap();
+
+    let bad_drill_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "qualify",
+            "--verify-drill",
+            bad_drill_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!bad_drill_out.status.success());
+
+    // 4. Create and verify qualification report via CLI
+    let mut report = lora_core::QualificationReport {
+        release_version: env!("CARGO_PKG_VERSION").to_string(),
+        pinned_worker_revision: lora_protocol::PINNED_LLAMA_CPP_REVISION.to_string(),
+        fixture_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .to_string(),
+        host_target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        m1_through_m7_verified: true,
+        soak_30_cycles_verified: true,
+        update_rollback_drill: drill,
+        outbound_network_attempts: 0,
+        support_matrix: lora_core::default_support_matrix(),
+        sbom_components: lora_core::default_sbom_notices(),
+        generated_files: Vec::new(),
+        report_sha256: None,
+    };
+    report.report_sha256 = Some(lora_core::compute_qualification_report_digest(&report));
+    assert!(lora_core::verify_qualification_report(&report).is_ok());
+
+    let report_path = tmp.path().join("qualification_report.json");
+    fs::write(&report_path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+
+    let report_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "qualify",
+            "--verify-report",
+            report_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        report_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&report_out.stderr)
+    );
+    let report_stdout = String::from_utf8_lossy(&report_out.stdout);
+    assert!(report_stdout.contains("Qualification report verified:"));
+    assert!(report_stdout.contains("soak_passed=true"));
+
+    // 5. Tampering with qualification report fails closed
+    let mut bad_report = report.clone();
+    bad_report.outbound_network_attempts = 1;
+    let bad_report_path = tmp.path().join("bad_report.json");
+    fs::write(
+        &bad_report_path,
+        serde_json::to_string_pretty(&bad_report).unwrap(),
+    )
+    .unwrap();
+
+    let bad_report_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "qualify",
+            "--verify-report",
+            bad_report_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!bad_report_out.status.success());
 }

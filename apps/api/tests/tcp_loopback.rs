@@ -149,7 +149,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "60",
+            "64",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -1018,6 +1018,64 @@ fn loopback_api_live_tcp_socket_e2e() {
     ));
     assert!(r60.starts_with("HTTP/1.1 200 OK"));
     assert!(r60.contains("\"verified\":true"));
+
+    // (bf) POST /v1/qualify/verify-drill verifies update & rollback drill receipt
+    let mut drill_rcpt = lora_core::run_update_and_rollback_drill(tmp.path()).unwrap();
+    let body_drill_ok = serde_json::to_string(&drill_rcpt).unwrap();
+    let r61 = send_http(&format!(
+        "POST /v1/qualify/verify-drill HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_drill_ok}",
+        body_drill_ok.len()
+    ));
+    assert!(r61.starts_with("HTTP/1.1 200 OK"));
+    assert!(r61.contains("\"verified\":true"));
+    assert!(r61.contains("\"passed\":true"));
+
+    // (bg) POST /v1/qualify/verify-drill rejects tampered receipt
+    drill_rcpt.passed = false;
+    let body_drill_bad = serde_json::to_string(&drill_rcpt).unwrap();
+    let r62 = send_http(&format!(
+        "POST /v1/qualify/verify-drill HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_drill_bad}",
+        body_drill_bad.len()
+    ));
+    assert!(r62.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(r62.contains("\"verified\":false"));
+
+    // (bh) POST /v1/qualify/verify-report verifies release qualification report
+    let qual_drill = lora_core::run_update_and_rollback_drill(tmp.path()).unwrap();
+    let mut qual_report = lora_core::QualificationReport {
+        release_version: "0.2.19".to_string(),
+        pinned_worker_revision: lora_protocol::PINNED_LLAMA_CPP_REVISION.to_string(),
+        fixture_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .to_string(),
+        host_target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        m1_through_m7_verified: true,
+        soak_30_cycles_verified: true,
+        update_rollback_drill: qual_drill,
+        outbound_network_attempts: 0,
+        support_matrix: lora_core::default_support_matrix(),
+        sbom_components: lora_core::default_sbom_notices(),
+        generated_files: Vec::new(),
+        report_sha256: None,
+    };
+    qual_report.report_sha256 = Some(lora_core::compute_qualification_report_digest(&qual_report));
+    let body_report_ok = serde_json::to_string(&qual_report).unwrap();
+    let r63 = send_http(&format!(
+        "POST /v1/qualify/verify-report HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_report_ok}",
+        body_report_ok.len()
+    ));
+    assert!(r63.starts_with("HTTP/1.1 200 OK"));
+    assert!(r63.contains("\"verified\":true"));
+    assert!(r63.contains("\"report_sha256\":"));
+
+    // (bi) POST /v1/qualify/verify-report rejects tampered report
+    qual_report.outbound_network_attempts = 1;
+    let body_report_bad = serde_json::to_string(&qual_report).unwrap();
+    let r64 = send_http(&format!(
+        "POST /v1/qualify/verify-report HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_report_bad}",
+        body_report_bad.len()
+    ));
+    assert!(r64.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(r64.contains("\"verified\":false"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());

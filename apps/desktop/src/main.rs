@@ -267,7 +267,8 @@ fn route_request(
                 "extension_manifest_attestation": true,
                 "policy_permit_attestation": true,
                 "tuning_receipt_attestation": true,
-                "adapter_attestation": true
+                "adapter_attestation": true,
+                "qualification_attestation": true
             });
             HttpResponse::json(&status)
         }

@@ -9,16 +9,17 @@ use lora_core::{
     prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
     validate_catalog_variant, validate_specialist_handoff, validate_workflow_job,
     verify_adapter_studio_outcome, verify_audit_attestation_bundle,
-    verify_compensating_patch_receipt, verify_dataset_split_manifest,
-    verify_receipt_self_integrity, verify_tuning_receipt, verify_workflow_attestation_bundle,
-    verify_workflow_receipt, AdapterStudioOutcome, AgentLimits, ApprovalDecision,
-    ApprovalPromptPort, ApprovalRequest, AuditAttestationBundle, BrokerSingleUsePermit, BrokerVerb,
-    CatalogVariantDescriptor, ChatTurn, CompensatingPatchReceipt, ContextBudgetRequest,
-    DatasetSplitManifest, ExecutionMode, ExecutionPermit, ExtensionManifestV1, HardwareProbePort,
-    HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig, PatchProposal,
-    PrivilegedBrokerGate, SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey,
-    TuningProfile, TuningReceipt, TuningTrialSample, WorkflowAttestationBundle, WorkflowJobConfig,
-    WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
+    verify_compensating_patch_receipt, verify_dataset_split_manifest, verify_qualification_report,
+    verify_receipt_self_integrity, verify_rollback_drill_receipt, verify_tuning_receipt,
+    verify_workflow_attestation_bundle, verify_workflow_receipt, AdapterStudioOutcome, AgentLimits,
+    ApprovalDecision, ApprovalPromptPort, ApprovalRequest, AuditAttestationBundle,
+    BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor, ChatTurn,
+    CompensatingPatchReceipt, ContextBudgetRequest, DatasetSplitManifest, ExecutionMode,
+    ExecutionPermit, ExtensionManifestV1, HardwareProbePort, HeldOutEvaluationReceipt,
+    LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
+    QualificationReport, SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey, TuningProfile,
+    TuningReceipt, TuningTrialSample, UpdateRollbackDrillReceipt, WorkflowAttestationBundle,
+    WorkflowJobConfig, WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -267,10 +268,16 @@ enum Commands {
     Qualify {
         /// Model alias, revision ID, or SHA-256 digest
         #[arg(long)]
-        model: String,
+        model: Option<String>,
         /// Output directory for the qualification package
         #[arg(long)]
-        output_dir: PathBuf,
+        output_dir: Option<PathBuf>,
+        /// Verify qualification report JSON artifact cryptographic attestation
+        #[arg(long)]
+        verify_report: Option<PathBuf>,
+        /// Verify update and rollback drill receipt JSON artifact cryptographic attestation
+        #[arg(long)]
+        verify_drill: Option<PathBuf>,
     },
 
     /// Index approved files inside a workspace scope into SQLite FTS5 (`docs/MEMORY_AND_RAG.md`)
@@ -1164,16 +1171,67 @@ fn main() {
             println!("Saved receipts : {}", output_dir.display());
             Ok(())
         }
-        Commands::Qualify { model, output_dir } => {
-            let report = app.qualify_release_package(&model, &output_dir)?;
+        Commands::Qualify {
+            model,
+            output_dir,
+            verify_report,
+            verify_drill,
+        } => {
+            if let Some(path) = verify_report {
+                let bytes = std::fs::read(path).map_err(|e| LoraError::Io(e.to_string()))?;
+                let report: QualificationReport = serde_json::from_slice(&bytes)
+                    .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
+                verify_qualification_report(&report)?;
+                println!(
+                    "Qualification report verified: release={} host={} soak_passed={} digest={}",
+                    report.release_version,
+                    report.host_target,
+                    report.soak_30_cycles_verified,
+                    report.report_sha256.as_deref().unwrap_or("none")
+                );
+                return Ok(());
+            }
+            if let Some(path) = verify_drill {
+                let bytes = std::fs::read(path).map_err(|e| LoraError::Io(e.to_string()))?;
+                let receipt: UpdateRollbackDrillReceipt = serde_json::from_slice(&bytes)
+                    .map_err(|e| LoraError::MalformedArtifact(e.to_string()))?;
+                verify_rollback_drill_receipt(&receipt)?;
+                println!(
+                    "Rollback drill receipt verified: from={} to={} passed={} digest={}",
+                    receipt.from_version,
+                    receipt.to_version,
+                    receipt.passed,
+                    receipt.receipt_sha256.as_deref().unwrap_or("none")
+                );
+                return Ok(());
+            }
+            let (model_id, out_dir) = match (model, output_dir) {
+                (Some(m), Some(o)) => (m, o),
+                _ => {
+                    return Err(LoraError::PolicyDenied(
+                        "either --verify-report, --verify-drill, or both --model and --output-dir must be provided".to_string(),
+                    ));
+                }
+            };
+            let report = app.qualify_release_package(model_id.as_str(), out_dir.as_path())?;
             println!("Release version       : {}", report.release_version);
             println!("Pinned worker revision: {}", report.pinned_worker_revision);
             println!("Fixture SHA-256       : {}", report.fixture_sha256);
             println!("Soak 30 cycles passed : {}", report.soak_30_cycles_verified);
             println!(
-                "Update/rollback drill : passed={}",
-                report.update_rollback_drill.passed
+                "Update/rollback drill : passed={} (attestation: {})",
+                report.update_rollback_drill.passed,
+                report
+                    .update_rollback_drill
+                    .receipt_sha256
+                    .as_deref()
+                    .unwrap_or("none")
             );
+            println!(
+                "Report attestation    : {}",
+                report.report_sha256.as_deref().unwrap_or("none")
+            );
+            println!("Generated bundle artifacts:");
             for (fname, sha) in &report.generated_files {
                 println!("  {sha}  {fname}");
             }

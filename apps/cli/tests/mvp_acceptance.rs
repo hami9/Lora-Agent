@@ -789,6 +789,10 @@ fn m8_qualification_and_soak() {
     assert!(report.soak_30_cycles_verified);
     assert!(report.update_rollback_drill.passed);
     assert!(report.update_rollback_drill.newer_schema_write_refused);
+    assert!(report.update_rollback_drill.receipt_sha256.is_some());
+    assert!(lora_core::verify_rollback_drill_receipt(&report.update_rollback_drill).is_ok());
+    assert!(report.report_sha256.is_some());
+    assert!(lora_core::verify_qualification_report(&report).is_ok());
     assert_eq!(report.outbound_network_attempts, 0);
 
     // Verify unknown GPU/NPU tuples remain explicitly labeled "unqualified"

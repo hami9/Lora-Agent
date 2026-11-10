@@ -83,9 +83,11 @@ pub use ports::{
     WorkerSessionPort, WorkerSpawnerPort,
 };
 pub use qualification::{
+    compute_qualification_report_digest, compute_rollback_drill_digest,
     default_risk_register_matrix, default_sbom_notices, default_support_matrix,
-    run_update_and_rollback_drill, PlatformSupportRow, QualificationReport, RiskRegisterEntry,
-    SbomComponent, UpdateRollbackDrillReceipt,
+    run_update_and_rollback_drill, verify_qualification_report, verify_rollback_drill_receipt,
+    PlatformSupportRow, QualificationReport, RiskRegisterEntry, SbomComponent,
+    UpdateRollbackDrillReceipt, QUALIFICATION_REPORT_DOMAIN_V1, ROLLBACK_DRILL_DOMAIN_V1,
 };
 pub use registry::{
     classify_artifact_compatibility, CompatibilityRecord, DeleteOutcome, ImportOutcome,

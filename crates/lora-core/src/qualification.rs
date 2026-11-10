@@ -10,6 +10,17 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 
+/// Domain separation prefix for update & rollback drill receipt attestation (`docs/MVP_SPECIFICATION.md`, `R13`).
+pub const ROLLBACK_DRILL_DOMAIN_V1: &[u8] = b"lora.rollback.drill.v1\0";
+
+/// Domain separation prefix for qualification report attestation (`docs/MVP_SPECIFICATION.md`, `M8`, `T10`).
+pub const QUALIFICATION_REPORT_DOMAIN_V1: &[u8] = b"lora.qualification.report.v1\0";
+
+fn update_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlatformSupportRow {
     pub target_triple: String,
@@ -48,6 +59,48 @@ pub struct UpdateRollbackDrillReceipt {
     pub rollback_restored_cleanly: bool,
     pub newer_schema_write_refused: bool,
     pub passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_sha256: Option<String>,
+}
+
+/// Compute a domain-separated canonical SHA-256 digest over an UpdateRollbackDrillReceipt (`lora.rollback.drill.v1`).
+pub fn compute_rollback_drill_digest(receipt: &UpdateRollbackDrillReceipt) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(ROLLBACK_DRILL_DOMAIN_V1);
+    update_len_prefixed(&mut hasher, receipt.from_version.as_bytes());
+    update_len_prefixed(&mut hasher, receipt.to_version.as_bytes());
+    hasher.update([receipt.backup_created as u8]);
+    hasher.update([receipt.upgrade_preserved_models as u8]);
+    hasher.update([receipt.rollback_restored_cleanly as u8]);
+    hasher.update([receipt.newer_schema_write_refused as u8]);
+    hasher.update([receipt.passed as u8]);
+    hex::encode(hasher.finalize())
+}
+
+/// Verify that an UpdateRollbackDrillReceipt passed all required safety checks and matches its cryptographic digest.
+pub fn verify_rollback_drill_receipt(
+    receipt: &UpdateRollbackDrillReceipt,
+) -> Result<(), LoraError> {
+    if !receipt.passed
+        || !receipt.backup_created
+        || !receipt.upgrade_preserved_models
+        || !receipt.newer_schema_write_refused
+        || !receipt.rollback_restored_cleanly
+    {
+        return Err(LoraError::PolicyDenied(
+            "update and rollback drill did not pass all required safety checks".to_string(),
+        ));
+    }
+    let expected = compute_rollback_drill_digest(receipt);
+    match &receipt.receipt_sha256 {
+        Some(digest) if digest == &expected => Ok(()),
+        Some(mismatch) => Err(LoraError::PolicyDenied(format!(
+            "rollback drill receipt digest mismatch: expected {expected}, got {mismatch}"
+        ))),
+        None => Err(LoraError::MalformedArtifact(
+            "rollback drill receipt missing cryptographic digest".to_string(),
+        )),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +116,68 @@ pub struct QualificationReport {
     pub support_matrix: Vec<PlatformSupportRow>,
     pub sbom_components: Vec<SbomComponent>,
     pub generated_files: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_sha256: Option<String>,
+}
+
+/// Compute a domain-separated canonical SHA-256 digest over a QualificationReport (`lora.qualification.report.v1`).
+pub fn compute_qualification_report_digest(report: &QualificationReport) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(QUALIFICATION_REPORT_DOMAIN_V1);
+    update_len_prefixed(&mut hasher, report.release_version.as_bytes());
+    update_len_prefixed(&mut hasher, report.pinned_worker_revision.as_bytes());
+    update_len_prefixed(&mut hasher, report.fixture_sha256.as_bytes());
+    update_len_prefixed(&mut hasher, report.host_target.as_bytes());
+    hasher.update([report.m1_through_m7_verified as u8]);
+    hasher.update([report.soak_30_cycles_verified as u8]);
+    hasher.update(report.outbound_network_attempts.to_le_bytes());
+
+    let drill_digest = compute_rollback_drill_digest(&report.update_rollback_drill);
+    update_len_prefixed(&mut hasher, drill_digest.as_bytes());
+
+    hasher.update((report.support_matrix.len() as u64).to_le_bytes());
+    for row in &report.support_matrix {
+        update_len_prefixed(&mut hasher, row.target_triple.as_bytes());
+        update_len_prefixed(&mut hasher, row.status.as_bytes());
+        hasher.update([row.scoped_file_read_qualified as u8]);
+    }
+
+    hasher.update((report.sbom_components.len() as u64).to_le_bytes());
+    for comp in &report.sbom_components {
+        update_len_prefixed(&mut hasher, comp.name.as_bytes());
+        update_len_prefixed(&mut hasher, comp.version_or_revision.as_bytes());
+        update_len_prefixed(&mut hasher, comp.spdx_license.as_bytes());
+    }
+
+    hex::encode(hasher.finalize())
+}
+
+/// Verify that a QualificationReport satisfies all milestone gates, zero outbound network attempts,
+/// valid rollback drill, and matching cryptographic digest.
+pub fn verify_qualification_report(report: &QualificationReport) -> Result<(), LoraError> {
+    if !report.m1_through_m7_verified || !report.soak_30_cycles_verified {
+        return Err(LoraError::PolicyDenied(
+            "qualification report failed milestone or soak verification".to_string(),
+        ));
+    }
+    if report.outbound_network_attempts > 0 {
+        return Err(LoraError::PolicyDenied(
+            "qualification report detected non-zero outbound network attempts in air-gapped runtime"
+                .to_string(),
+        ));
+    }
+    verify_rollback_drill_receipt(&report.update_rollback_drill)?;
+
+    let expected = compute_qualification_report_digest(report);
+    match &report.report_sha256 {
+        Some(digest) if digest == &expected => Ok(()),
+        Some(mismatch) => Err(LoraError::PolicyDenied(format!(
+            "qualification report digest mismatch: expected {expected}, got {mismatch}"
+        ))),
+        None => Err(LoraError::MalformedArtifact(
+            "qualification report missing cryptographic digest".to_string(),
+        )),
+    }
 }
 
 pub fn default_support_matrix() -> Vec<PlatformSupportRow> {
@@ -360,7 +475,7 @@ pub fn run_update_and_rollback_drill(
         && newer_schema_write_refused
         && rollback_restored_cleanly;
 
-    Ok(UpdateRollbackDrillReceipt {
+    let mut receipt = UpdateRollbackDrillReceipt {
         from_version: "0.0.0".to_string(),
         to_version: env!("CARGO_PKG_VERSION").to_string(),
         backup_created,
@@ -368,7 +483,10 @@ pub fn run_update_and_rollback_drill(
         rollback_restored_cleanly,
         newer_schema_write_refused,
         passed,
-    })
+        receipt_sha256: None,
+    };
+    receipt.receipt_sha256 = Some(compute_rollback_drill_digest(&receipt));
+    Ok(receipt)
 }
 
 impl LoraApplicationService {
@@ -428,7 +546,9 @@ impl LoraApplicationService {
             support_matrix,
             sbom_components,
             generated_files: Vec::new(),
+            report_sha256: None,
         };
+        report.report_sha256 = Some(compute_qualification_report_digest(&report));
 
         let report_path = output_dir.join("qualification-report.json");
         fs::write(
@@ -458,5 +578,82 @@ impl LoraApplicationService {
         report.generated_files = generated_files;
 
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rollback_drill_receipt_attestation_and_verification() {
+        let mut receipt = UpdateRollbackDrillReceipt {
+            from_version: "0.2.18".to_string(),
+            to_version: "0.2.19".to_string(),
+            backup_created: true,
+            upgrade_preserved_models: true,
+            rollback_restored_cleanly: true,
+            newer_schema_write_refused: true,
+            passed: true,
+            receipt_sha256: None,
+        };
+        let digest = compute_rollback_drill_digest(&receipt);
+        assert_eq!(digest.len(), 64);
+        receipt.receipt_sha256 = Some(digest);
+        assert!(verify_rollback_drill_receipt(&receipt).is_ok());
+
+        // Failed drill check fails
+        let mut failed = receipt.clone();
+        failed.rollback_restored_cleanly = false;
+        assert!(verify_rollback_drill_receipt(&failed).is_err());
+
+        // Mismatched digest fails
+        let mut tampered = receipt.clone();
+        tampered.to_version = "99.0.0".to_string();
+        assert!(verify_rollback_drill_receipt(&tampered).is_err());
+    }
+
+    #[test]
+    fn test_qualification_report_attestation_and_verification() {
+        let mut drill = UpdateRollbackDrillReceipt {
+            from_version: "0.2.18".to_string(),
+            to_version: "0.2.19".to_string(),
+            backup_created: true,
+            upgrade_preserved_models: true,
+            rollback_restored_cleanly: true,
+            newer_schema_write_refused: true,
+            passed: true,
+            receipt_sha256: None,
+        };
+        drill.receipt_sha256 = Some(compute_rollback_drill_digest(&drill));
+
+        let mut report = QualificationReport {
+            release_version: "0.2.19".to_string(),
+            pinned_worker_revision: PINNED_LLAMA_CPP_REVISION.to_string(),
+            fixture_sha256: "aabbccdd11223344".to_string(),
+            host_target: "x86_64-windows".to_string(),
+            m1_through_m7_verified: true,
+            soak_30_cycles_verified: true,
+            update_rollback_drill: drill,
+            outbound_network_attempts: 0,
+            support_matrix: default_support_matrix(),
+            sbom_components: default_sbom_notices(),
+            generated_files: Vec::new(),
+            report_sha256: None,
+        };
+        let digest = compute_qualification_report_digest(&report);
+        assert_eq!(digest.len(), 64);
+        report.report_sha256 = Some(digest);
+        assert!(verify_qualification_report(&report).is_ok());
+
+        // Network violation fails
+        let mut net_violation = report.clone();
+        net_violation.outbound_network_attempts = 1;
+        assert!(verify_qualification_report(&net_violation).is_err());
+
+        // Digest mismatch fails
+        let mut tampered = report.clone();
+        tampered.fixture_sha256 = "corrupted".to_string();
+        assert!(verify_qualification_report(&tampered).is_err());
     }
 }
