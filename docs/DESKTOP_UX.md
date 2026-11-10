@@ -34,3 +34,16 @@ Sidebar groups are **Work** (Dashboard, Chat, Agent Workspace), **Library** (Mod
 Set semantic landmarks and real control labels. Keyboard users can navigate every screen, cancel a run, inspect a receipt and reject a request without a pointer. Dialogs trap and restore focus, default to the least-privileged choice, and describe errors in text. Do not announce token-by-token updates to screen readers. Use a throttled summary and a user-controlled transcript. Respect system scale, contrast, reduced motion and RTL text. Validate against WCAG 2.2 AA criteria and test keyboard-only use, NVDA on Windows and VoiceOver on macOS. [WCAG 2.2](https://www.w3.org/TR/WCAG22/)
 
 Virtualize long transcripts, coalesce stream deltas on animation frames, sample telemetry at a low rate, pause hidden charts and avoid chart animations on battery. Measure cold open, idle RAM/CPU and input responsiveness during generation with the same model and prompt as the CLI. Release the desktop client only after the first-time, denied-grant, missing-webview, out-of-memory, crash and stop journeys pass on each advertised platform.
+
+## Desktop View-Model Cryptographic Attestation
+
+The desktop projection layer produces cryptographically signed state snapshots (`DesktopSnapshot`) under domain separator `lora.desktop.snapshot.v1\0` (`DESKTOP_SNAPSHOT_DOMAIN_V1`).
+
+Each snapshot binds:
+- Active screen navigation destination
+- Complete status strip state and reachability invariants
+- Hardware memory budgets (installed models, available/total RAM, CPU summary)
+- Session identifier and anti-spoofing challenge token
+- Audit journal event counter
+
+Verification routines (`verify_desktop_snapshot`) confirm state integrity and detect any UI state tampering before client render. Supported in CLI (`lora status --verify-desktop <PATH>`, `lora-desktop --verify-snapshot <PATH>`), loopback bridge (`GET /api/desktop-snapshot`), and REST API (`GET /v1/desktop/snapshot`, `POST /v1/desktop/verify`).

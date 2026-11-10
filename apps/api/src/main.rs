@@ -20,11 +20,12 @@ use lora_core::{
 use lora_core::{
     compute_extension_manifest_digest, compute_patch_receipt_digest, verify_adapter_studio_outcome,
     verify_audit_attestation_bundle, verify_benchmark_receipt, verify_compensating_patch_receipt,
-    verify_dataset_split_manifest, verify_held_out_evaluation_receipt, verify_qualification_report,
-    verify_receipt_self_integrity, verify_rollback_drill_receipt, verify_tuning_receipt,
-    verify_workflow_attestation_bundle, verify_workflow_receipt, AdapterStudioOutcome,
-    AuditAttestationBundle, BenchmarkReceipt, DatasetSplitManifest, ExecutionPermit,
-    QualificationReport, TuningReceipt, UpdateRollbackDrillReceipt, WorkflowAttestationBundle,
+    verify_dataset_split_manifest, verify_desktop_snapshot, verify_held_out_evaluation_receipt,
+    verify_qualification_report, verify_receipt_self_integrity, verify_rollback_drill_receipt,
+    verify_tuning_receipt, verify_workflow_attestation_bundle, verify_workflow_receipt,
+    AdapterStudioOutcome, AuditAttestationBundle, BenchmarkReceipt, DatasetSplitManifest,
+    DesktopScreen, DesktopSnapshot, ExecutionPermit, QualificationReport, TuningReceipt,
+    UpdateRollbackDrillReceipt, WorkflowAttestationBundle,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -1169,6 +1170,88 @@ fn handle_http_connection(
                         "model_sha256": receipt.model_sha256,
                         "soak_passed": receipt.soak_receipt.passed,
                         "receipt_sha256": receipt.receipt_sha256,
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "verified": false,
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("GET", "/v1/desktop/snapshot") => {
+            match app.capture_desktop_snapshot(DesktopScreen::Dashboard, false, "api-snapshot-sess")
+            {
+                Ok(snapshot) => {
+                    let body = serde_json::to_string(&snapshot).unwrap_or_default();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &err,
+                    )
+                }
+            }
+        }
+        ("POST", "/v1/desktop/verify") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            let snap_val = req_json
+                .get("snapshot")
+                .cloned()
+                .unwrap_or_else(|| req_json.clone());
+            let snapshot: DesktopSnapshot = match serde_json::from_value(snap_val) {
+                Ok(s) => s,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid desktop snapshot payload: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+            match verify_desktop_snapshot(&snapshot) {
+                Ok(()) => {
+                    let body = serde_json::json!({
+                        "verified": true,
+                        "session_id": snapshot.session_id,
+                        "screen": snapshot.screen,
+                        "digest": snapshot.snapshot_sha256,
+                        "domain": "lora.desktop.snapshot.v1",
                     })
                     .to_string();
                     write_http_response(stream, "200 OK", "application/json", &body)

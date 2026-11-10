@@ -149,7 +149,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "66",
+            "68",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -1134,6 +1134,27 @@ fn loopback_api_live_tcp_socket_e2e() {
     ));
     assert!(r66.starts_with("HTTP/1.1 400 Bad Request"));
     assert!(r66.contains("\"verified\":false"));
+
+    // (bl) GET /v1/desktop/snapshot captures and returns attested DesktopSnapshot
+    let r67 = send_http(&format!(
+        "GET /v1/desktop/snapshot HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\n\r\n"
+    ));
+    assert!(r67.starts_with("HTTP/1.1 200 OK"));
+    let (_, body67) = r67.split_once("\r\n\r\n").unwrap();
+    let snap: lora_core::DesktopSnapshot =
+        serde_json::from_str(body67).expect("parse DesktopSnapshot");
+    assert!(snap.snapshot_sha256.is_some());
+    assert!(lora_core::verify_desktop_snapshot(&snap).is_ok());
+
+    // (bm) POST /v1/desktop/verify verifies the desktop snapshot attestation
+    let body_snap_json = serde_json::to_string(&snap).unwrap();
+    let r68 = send_http(&format!(
+        "POST /v1/desktop/verify HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_snap_json}",
+        body_snap_json.len()
+    ));
+    assert!(r68.starts_with("HTTP/1.1 200 OK"));
+    assert!(r68.contains("\"verified\":true"));
+    assert!(r68.contains("\"domain\":\"lora.desktop.snapshot.v1\""));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());

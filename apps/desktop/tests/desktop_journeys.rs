@@ -114,6 +114,36 @@ fn desktop_shell_view_model_csp_and_capabilities_e2e() {
     assert_eq!(slice_vm.start_index, 1200);
     assert_eq!(slice_vm.end_index, 1225);
     assert_eq!(slice_vm.visible_items.len(), 25);
+
+    // 7. Verify --dump-snapshot and --verify-snapshot cryptographic attestation
+    let dump_out = Command::new(desktop_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "--dump-snapshot",
+        ])
+        .output()
+        .expect("run lora-desktop --dump-snapshot");
+    assert!(dump_out.status.success());
+    let snap: lora_core::DesktopSnapshot =
+        serde_json::from_slice(&dump_out.stdout).expect("parse DesktopSnapshot");
+    assert!(snap.snapshot_sha256.is_some());
+
+    let snap_path = tmp.path().join("desktop-snapshot.json");
+    std::fs::write(&snap_path, &dump_out.stdout).expect("write snapshot");
+
+    let verify_out = Command::new(desktop_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "--verify-snapshot",
+            snap_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run lora-desktop --verify-snapshot");
+    assert!(verify_out.status.success());
+    let verify_str = String::from_utf8_lossy(&verify_out.stdout);
+    assert!(verify_str.contains("Desktop Snapshot Attestation: verified"));
 }
 
 fn http_request(addr: &str, raw: &str) -> (String, String) {
@@ -155,7 +185,7 @@ fn desktop_loopback_bridge_serves_ui_and_view_models() {
             "--serve",
             "127.0.0.1:0",
             "--max-requests",
-            "17",
+            "18",
         ])
         .stdout(Stdio::piped())
         .spawn()
@@ -283,6 +313,14 @@ fn desktop_loopback_bridge_serves_ui_and_view_models() {
         &format!("POST /api/dashboard HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\n\r\n"),
     );
     assert!(head.starts_with("HTTP/1.1 405"));
+
+    // 18. Attested desktop snapshot endpoint
+    let (head, body) = get("/api/desktop-snapshot");
+    assert!(head.starts_with("HTTP/1.1 200"));
+    let snap: lora_core::DesktopSnapshot =
+        serde_json::from_str(&body).expect("desktop snapshot json");
+    assert!(snap.snapshot_sha256.is_some());
+    assert!(lora_core::verify_desktop_snapshot(&snap).is_ok());
 
     let status = child.wait().expect("bridge exits after max requests");
     assert!(status.success());

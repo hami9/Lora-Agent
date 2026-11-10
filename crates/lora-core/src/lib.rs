@@ -55,8 +55,9 @@ pub use catalog::{
     DownloadResumeCheckpoint, ResumeDecision, MAX_CATALOG_REDIRECTS,
 };
 pub use desktop_facade::{
-    slice_virtualized_transcript, DesktopDashboardViewModel, DesktopScreen, StatusStripState,
-    TrustedConsentDialogViewModel, VirtualizedTranscriptSlice,
+    compute_desktop_snapshot_digest, slice_virtualized_transcript, verify_desktop_snapshot,
+    DesktopDashboardViewModel, DesktopScreen, DesktopSnapshot, StatusStripState,
+    TrustedConsentDialogViewModel, VirtualizedTranscriptSlice, DESKTOP_SNAPSHOT_DOMAIN_V1,
 };
 pub use error::{redact_sensitive_text, LoraError, ReasonCode};
 pub use memory::{

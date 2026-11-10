@@ -3443,3 +3443,86 @@ fn test_benchmark_summary_and_soak_attestation_cli() {
     let err_txt = String::from_utf8_lossy(&bad_bench_out.stderr);
     assert!(err_txt.contains("benchmark receipt digest mismatch"));
 }
+
+#[test]
+fn test_desktop_snapshot_attestation_cli() {
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().unwrap();
+
+    // 1. Regular status mentions desktop attestation readiness
+    let status_out = Command::new(lora_bin)
+        .args(["--data-dir", tmp.path().to_str().unwrap(), "status"])
+        .output()
+        .unwrap();
+    assert!(status_out.status.success());
+    let stdout = String::from_utf8_lossy(&status_out.stdout);
+    assert!(stdout.contains("Desktop Attestation   : Ready (v1, domain: lora.desktop.snapshot.v1)"));
+
+    // 2. Create valid DesktopSnapshot and verify via CLI
+    let dashboard = lora_core::DesktopDashboardViewModel {
+        status_strip: lora_core::StatusStripState {
+            execution_destination: "local_cpu_worker".to_string(),
+            active_model_alias: Some("demo-model".to_string()),
+            active_task_busy: false,
+            stop_command_reachable: true,
+            experimental_screens_enabled: false,
+        },
+        installed_model_count: 1,
+        available_ram_mib: 8192,
+        total_ram_mib: 16384,
+        cpu_summary: "x86_64 (16 cores)".to_string(),
+        unavailable_sensors: vec![],
+        recent_audit_count: 5,
+    };
+    let mut snapshot = lora_core::DesktopSnapshot {
+        schema_version: 1,
+        session_id: "cli-test-session".to_string(),
+        timestamp_ms: 1731234567890,
+        screen: lora_core::DesktopScreen::Dashboard,
+        dashboard,
+        anti_spoofing_token: "ds-cli-123".to_string(),
+        snapshot_sha256: None,
+    };
+    snapshot.snapshot_sha256 = Some(lora_core::compute_desktop_snapshot_digest(&snapshot));
+
+    let snap_path = tmp.path().join("desktop_snap.json");
+    fs::write(&snap_path, serde_json::to_string_pretty(&snapshot).unwrap()).unwrap();
+
+    let verify_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "status",
+            "--verify-desktop",
+            snap_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(verify_out.status.success());
+    let verify_stdout = String::from_utf8_lossy(&verify_out.stdout);
+    assert!(verify_stdout.contains("Desktop Snapshot Attestation: verified (digest:"));
+
+    // 3. Tampered snapshot fails closed
+    let mut bad_snapshot = snapshot.clone();
+    bad_snapshot.session_id = "attacker-tampered".to_string();
+    let bad_path = tmp.path().join("bad_desktop_snap.json");
+    fs::write(
+        &bad_path,
+        serde_json::to_string_pretty(&bad_snapshot).unwrap(),
+    )
+    .unwrap();
+
+    let bad_verify_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "status",
+            "--verify-desktop",
+            bad_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!bad_verify_out.status.success());
+    let bad_stderr = String::from_utf8_lossy(&bad_verify_out.stderr);
+    assert!(bad_stderr.contains("desktop snapshot digest mismatch"));
+}

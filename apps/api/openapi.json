@@ -312,6 +312,32 @@
         }
       }
     },
+    "/v1/desktop/snapshot": {
+      "get": {
+        "summary": "Capture and return a cryptographically attested DesktopSnapshot of live system state",
+        "responses": {
+          "200": {
+            "description": "DesktopSnapshot attested with domain-separated SHA-256 digest"
+          },
+          "500": {
+            "description": "Internal failure capturing desktop snapshot"
+          }
+        }
+      }
+    },
+    "/v1/desktop/verify": {
+      "post": {
+        "summary": "Verify cryptographic attestation digest of a DesktopSnapshot",
+        "responses": {
+          "200": {
+            "description": "DesktopSnapshot verified successfully"
+          },
+          "400": {
+            "description": "Snapshot malformed or digest mismatch"
+          }
+        }
+      }
+    },
     "/v1/hardware/tune": {
       "post": {
         "summary": "Run bounded auto-tuning calibration grid and persist verified tuning receipt",

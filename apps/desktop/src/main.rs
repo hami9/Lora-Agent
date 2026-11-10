@@ -5,9 +5,10 @@
 use clap::Parser;
 use lora_core::{
     allocate_context_budget, default_risk_register_matrix, slice_virtualized_transcript,
-    validate_workflow_job, ApprovalDecision, ApprovalPromptPort, ApprovalRequest,
-    ContextBudgetRequest, LoraApplicationService, LoraError, TrustedConsentDialogViewModel,
-    WorkflowJobConfig, WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES,
+    validate_workflow_job, verify_desktop_snapshot, ApprovalDecision, ApprovalPromptPort,
+    ApprovalRequest, ContextBudgetRequest, DesktopScreen, DesktopSnapshot, LoraApplicationService,
+    LoraError, TrustedConsentDialogViewModel, WorkflowJobConfig, WorkflowStepKind,
+    DEFAULT_SAFETY_RESERVE_BYTES,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -44,6 +45,14 @@ struct DesktopCli {
     /// Emit initial desktop dashboard view-model JSON and exit
     #[arg(long)]
     dump_view_model: bool,
+
+    /// Emit a cryptographically attested DesktopSnapshot JSON and exit
+    #[arg(long)]
+    dump_snapshot: bool,
+
+    /// Verify a DesktopSnapshot JSON file and exit with validation status
+    #[arg(long)]
+    verify_snapshot: Option<PathBuf>,
 
     /// Emit a WCAG 2.2 AA TrustedConsentDialogViewModel JSON for a proposed relative path and exit
     #[arg(long)]
@@ -269,9 +278,23 @@ fn route_request(
                 "tuning_receipt_attestation": true,
                 "adapter_attestation": true,
                 "qualification_attestation": true,
-                "benchmark_attestation": true
+                "benchmark_attestation": true,
+                "desktop_attestation": true
             });
             HttpResponse::json(&status)
+        }
+        "/api/desktop-snapshot" => {
+            match app.capture_desktop_snapshot(
+                DesktopScreen::Dashboard,
+                experimental,
+                "desktop-loopback-sess",
+            ) {
+                Ok(snapshot) => HttpResponse::json(&snapshot),
+                Err(e) => HttpResponse::error(
+                    "500 Internal Server Error",
+                    &format!("{:?}", e.reason_code()),
+                ),
+            }
         }
         "/api/audit-bundle" => match app.store.export_audit_attestation_bundle(None, Some(50)) {
             Ok(bundle) => HttpResponse::json(&bundle),
@@ -571,6 +594,56 @@ fn main() {
             "{}",
             serde_json::to_string_pretty(&slice).expect("serialize VirtualizedTranscriptSlice")
         );
+        return;
+    }
+
+    if let Some(verify_path) = cli.verify_snapshot.as_ref() {
+        let content = match std::fs::read_to_string(verify_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error reading snapshot file: {e}");
+                std::process::exit(1);
+            }
+        };
+        let snapshot: DesktopSnapshot = match serde_json::from_str(&content) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error parsing DesktopSnapshot JSON: {e}");
+                std::process::exit(1);
+            }
+        };
+        match verify_desktop_snapshot(&snapshot) {
+            Ok(()) => {
+                println!(
+                    "Desktop Snapshot Attestation: verified (digest: {})",
+                    snapshot.snapshot_sha256.as_deref().unwrap_or("none")
+                );
+            }
+            Err(e) => {
+                eprintln!("error [{:?}]: {}", e.reason_code(), e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if cli.dump_snapshot {
+        match app.capture_desktop_snapshot(
+            DesktopScreen::Dashboard,
+            cli.experimental,
+            "desktop-cli-session",
+        ) {
+            Ok(snapshot) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&snapshot).expect("serialize DesktopSnapshot")
+                );
+            }
+            Err(e) => {
+                eprintln!("error [{:?}]: {}", e.reason_code(), e);
+                std::process::exit(1);
+            }
+        }
         return;
     }
 

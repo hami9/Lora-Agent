@@ -365,7 +365,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "lora-api"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "clap",
  "lora-core",
@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "lora-cli"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "clap",
  "hex",
@@ -396,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "lora-core"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "hex",
  "lora-protocol",
@@ -412,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "lora-desktop"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "clap",
  "lora-core",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "lora-llama-worker"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "cc",
  "cmake",
@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "lora-platform"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "hex",
  "lora-core",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "lora-protocol"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "hex",
  "serde",

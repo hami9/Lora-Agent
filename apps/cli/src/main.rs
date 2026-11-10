@@ -9,17 +9,18 @@ use lora_core::{
     prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
     validate_catalog_variant, validate_specialist_handoff, validate_workflow_job,
     verify_adapter_studio_outcome, verify_audit_attestation_bundle, verify_benchmark_receipt,
-    verify_compensating_patch_receipt, verify_dataset_split_manifest, verify_qualification_report,
-    verify_receipt_self_integrity, verify_rollback_drill_receipt, verify_tuning_receipt,
-    verify_workflow_attestation_bundle, verify_workflow_receipt, AdapterStudioOutcome, AgentLimits,
-    ApprovalDecision, ApprovalPromptPort, ApprovalRequest, AuditAttestationBundle,
-    BenchmarkReceipt, BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor, ChatTurn,
-    CompensatingPatchReceipt, ContextBudgetRequest, DatasetSplitManifest, ExecutionMode,
-    ExecutionPermit, ExtensionManifestV1, HardwareProbePort, HeldOutEvaluationReceipt,
-    LoraApplicationService, LoraError, LoraJobConfig, PatchProposal, PrivilegedBrokerGate,
-    QualificationReport, SpecialistHandoffEnvelope, TrainingExample, TuningCacheKey, TuningProfile,
-    TuningReceipt, TuningTrialSample, UpdateRollbackDrillReceipt, WorkflowAttestationBundle,
-    WorkflowJobConfig, WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
+    verify_compensating_patch_receipt, verify_dataset_split_manifest, verify_desktop_snapshot,
+    verify_qualification_report, verify_receipt_self_integrity, verify_rollback_drill_receipt,
+    verify_tuning_receipt, verify_workflow_attestation_bundle, verify_workflow_receipt,
+    AdapterStudioOutcome, AgentLimits, ApprovalDecision, ApprovalPromptPort, ApprovalRequest,
+    AuditAttestationBundle, BenchmarkReceipt, BrokerSingleUsePermit, BrokerVerb,
+    CatalogVariantDescriptor, ChatTurn, CompensatingPatchReceipt, ContextBudgetRequest,
+    DatasetSplitManifest, DesktopSnapshot, ExecutionMode, ExecutionPermit, ExtensionManifestV1,
+    HardwareProbePort, HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig,
+    PatchProposal, PrivilegedBrokerGate, QualificationReport, SpecialistHandoffEnvelope,
+    TrainingExample, TuningCacheKey, TuningProfile, TuningReceipt, TuningTrialSample,
+    UpdateRollbackDrillReceipt, WorkflowAttestationBundle, WorkflowJobConfig, WorkflowStepKind,
+    DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -91,7 +92,11 @@ enum Commands {
     },
 
     /// Inspect local runtime state, installed model count, reservation status, and recent audit count (`docs/API_AND_SDK.md`)
-    Status,
+    Status {
+        /// Optional path to a DesktopSnapshot JSON file to verify cryptographic attestation
+        #[arg(long)]
+        verify_desktop: Option<PathBuf>,
+    },
 
     /// List, stage, activate, fault-quarantine, or roll back extensions (`docs/PLUGIN_SYSTEM.md`)
     Plugins {
@@ -722,7 +727,21 @@ fn run_cli() {
             }
             Ok(())
         }
-        Commands::Status => {
+        Commands::Status { verify_desktop } => {
+            if let Some(path) = verify_desktop {
+                let content = std::fs::read_to_string(&path)
+                    .map_err(|e| LoraError::Io(format!("failed to read snapshot file: {e}")))?;
+                let snapshot: DesktopSnapshot = serde_json::from_str(&content).map_err(|e| {
+                    LoraError::MalformedArtifact(format!("invalid DesktopSnapshot JSON: {e}"))
+                })?;
+                verify_desktop_snapshot(&snapshot)?;
+                println!(
+                    "Desktop Snapshot Attestation: verified (digest: {})",
+                    snapshot.snapshot_sha256.as_deref().unwrap_or("none")
+                );
+                return Ok(());
+            }
+
             let vm = app.build_desktop_dashboard(false)?;
             println!(
                 "Execution destination : {}",
@@ -745,6 +764,7 @@ fn run_cli() {
                 vm.available_ram_mib, vm.total_ram_mib
             );
             println!("Audit event count     : {}", vm.recent_audit_count);
+            println!("Desktop Attestation   : Ready (v1, domain: lora.desktop.snapshot.v1)");
             Ok(())
         }
         Commands::Plugins {
