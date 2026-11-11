@@ -61,3 +61,24 @@ Rig provides reusable provider/tool abstractions and Goose exposes extension-ori
 ## Acceptance
 
 Use a fake planner plus a real scoped filesystem adapter. Test a correct read, invalid JSON, an unknown tool, refusal, revocation during a read, truncation, an injected request to upload a file, cancellation racing a final event, exhausted budgets, and a crash between dispatch and recording the receipt. Repeat the end-to-end path with the exact qualified model/template pair. No test may produce a second terminal event, duplicate a side effect or read an unapproved file. See [security architecture](SECURITY_ARCHITECTURE.md) and [OS integration](OS_INTEGRATION.md).
+
+## Agent Run Outcome Cryptographic Attestation
+
+To prevent anti-spoofing, fabrication, and tampering of agent run responses, evidence citations, and tool invocation receipts, every completed `AgentRunOutcome` produces a domain-separated cryptographic attestation digest (`R17`, `T8`):
+
+- **Domain Separation Prefix**: `AGENT_RUN_DOMAIN_V1 = b"lora.agent.run.v1\0"`
+- **Digest Computation (`compute_agent_run_digest`)**: Computes SHA-256 over:
+  - Domain separation prefix `lora.agent.run.v1\0`
+  - `run_id` (length-prefixed)
+  - `final_state` (`planning`, `checking`, `awaiting_approval`, `executing`, `observing`, `verifying`, `succeeded`, `failed`, `interrupted`, `cancelled`)
+  - `answer` (length-prefixed UTF-8)
+  - Canonical citations count and ordered entries (`relative_path`, line range presence and values, `byte_range`, `excerpt_sha256`, truncation flag)
+  - Canonical receipts count and ordered entries (`invocation_id`, `outcome`, `resource_identity`, `relative_path`, `byte_range`, line range, `excerpt_sha256`, truncation flag, error code)
+  - `turns_used` (little-endian `u32`)
+- **Digest Storage**: Stored in `AgentRunOutcome::outcome_sha256`.
+- **Integrity Verification (`verify_agent_run_outcome`)**: Recomputes the canonical digest over the outcome fields and fails closed on digest mismatch, missing digest, or invalid parameter lengths.
+- **CLI Commands**:
+  - `lora ask ... --export-outcome <PATH>`: Exports the complete verified `AgentRunOutcome` JSON.
+  - `lora ask --verify-outcome <PATH>`: Validates cryptographic attestation and prints verification results.
+- **REST API**: `POST /v1/agent/verify-outcome`: Validates incoming `AgentRunOutcome` payload against domain `lora.agent.run.v1`.
+- **Desktop Shell**: Exposes `"agent_run_attestation": true` on `/api/workflow-status` with UI badge `Agent Run Attestation: Verified Bound (v1)`.

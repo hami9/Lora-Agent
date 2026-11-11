@@ -23,6 +23,18 @@ pub const DEFAULT_MAX_FILE_BYTES: usize = 32 * 1024; // 32 KiB
 pub const DEFAULT_RUN_DEADLINE_SECS: u64 = 120;
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 512;
 
+/// Domain separation prefix for agent run outcome cryptographic attestation (`docs/AGENT_RUNTIME.md`).
+pub const AGENT_RUN_DOMAIN_V1: &[u8] = b"lora.agent.run.v1\0";
+
+/// Domain separation prefix for workflow job configuration digests (`docs/AGENT_RUNTIME.md`).
+pub const WORKFLOW_CONFIG_DOMAIN_V1: &[u8] = b"lora.workflow.config.v1\0";
+
+/// Domain separation prefix for workflow execution receipt digests (`docs/AGENT_RUNTIME.md`).
+pub const WORKFLOW_RECEIPT_DOMAIN_V1: &[u8] = b"lora.workflow.receipt.v1\0";
+
+/// Domain separation prefix for workflow attestation bundles (`docs/AGENT_RUNTIME.md`).
+pub const WORKFLOW_BUNDLE_DOMAIN_V1: &[u8] = b"lora.workflow.bundle.v1\0";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentLimits {
     pub max_tool_calls: u32,
@@ -66,6 +78,7 @@ pub struct CitedEvidence {
     pub truncated: bool,
 }
 
+/// Verified agent run outcome with domain-separated cryptographic attestation (`docs/AGENT_RUNTIME.md`, `R17`, `T8`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRunOutcome {
     pub run_id: String,
@@ -74,6 +87,8 @@ pub struct AgentRunOutcome {
     pub citations: Vec<CitedEvidence>,
     pub receipts: Vec<ToolReceipt>,
     pub turns_used: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome_sha256: Option<String>,
 }
 
 /// Validate a structured tool proposal strictly (`docs/AGENT_RUNTIME.md`):
@@ -796,14 +811,17 @@ impl<'a> BoundedAgentRuntime<'a> {
                 ),
             )?;
 
-            return Ok(AgentRunOutcome {
+            let mut outcome = AgentRunOutcome {
                 run_id: run_id.to_string(),
                 final_state: RunState::Succeeded,
                 answer: final_text,
                 citations,
                 receipts,
                 turns_used: turn,
-            });
+                outcome_sha256: None,
+            };
+            outcome.outcome_sha256 = Some(compute_agent_run_digest(&outcome));
+            return Ok(outcome);
         }
     }
 }
@@ -982,7 +1000,7 @@ fn update_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
 /// over a canonical `WorkflowJobConfig` specification.
 pub fn compute_workflow_config_digest(config: &WorkflowJobConfig) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"lora.workflow.config.v1\0");
+    hasher.update(WORKFLOW_CONFIG_DOMAIN_V1);
     update_len_prefixed(&mut hasher, config.workflow_id.as_bytes());
     update_len_prefixed(&mut hasher, config.title.as_bytes());
     hasher.update([u8::from(config.stop_on_failure)]);
@@ -1069,7 +1087,7 @@ pub fn compute_workflow_config_digest(config: &WorkflowJobConfig) -> String {
 /// binding a `WorkflowExecutionReceipt` to its `config_sha256` and every step outcome.
 pub fn compute_workflow_receipt_digest(receipt: &WorkflowExecutionReceipt) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"lora.workflow.receipt.v1\0");
+    hasher.update(WORKFLOW_RECEIPT_DOMAIN_V1);
     update_len_prefixed(&mut hasher, receipt.workflow_id.as_bytes());
     update_len_prefixed(
         &mut hasher,
@@ -1149,7 +1167,7 @@ pub struct WorkflowAttestationBundle {
 /// over a `WorkflowAttestationBundle` header and its ordered receipt digests.
 pub fn compute_workflow_bundle_digest(bundle: &WorkflowAttestationBundle) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"lora.workflow.bundle.v1\0");
+    hasher.update(WORKFLOW_BUNDLE_DOMAIN_V1);
     hasher.update(bundle.schema_version.to_le_bytes());
     hasher.update(bundle.exported_at_ms.to_le_bytes());
     hasher.update((bundle.total_receipts as u64).to_le_bytes());
@@ -1224,6 +1242,79 @@ pub fn verify_workflow_attestation_bundle(
         ));
     }
     Ok(())
+}
+
+/// Compute a domain-separated SHA-256 attestation digest (`lora.agent.run.v1`) over an `AgentRunOutcome`.
+pub fn compute_agent_run_digest(outcome: &AgentRunOutcome) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(AGENT_RUN_DOMAIN_V1);
+    update_len_prefixed(&mut hasher, outcome.run_id.as_bytes());
+
+    update_len_prefixed(&mut hasher, outcome.final_state.as_str().as_bytes());
+    update_len_prefixed(&mut hasher, outcome.answer.as_bytes());
+
+    // Citations
+    hasher.update((outcome.citations.len() as u64).to_le_bytes());
+    for c in &outcome.citations {
+        update_len_prefixed(&mut hasher, c.relative_path.as_bytes());
+        match c.line_range {
+            Some((s, e)) => {
+                hasher.update([1u8]);
+                hasher.update(s.to_le_bytes());
+                hasher.update(e.to_le_bytes());
+            }
+            None => hasher.update([0u8]),
+        }
+        hasher.update(c.byte_range.0.to_le_bytes());
+        hasher.update(c.byte_range.1.to_le_bytes());
+        update_len_prefixed(&mut hasher, c.excerpt_sha256.as_bytes());
+        hasher.update([c.truncated as u8]);
+    }
+
+    // Receipts
+    hasher.update((outcome.receipts.len() as u64).to_le_bytes());
+    for r in &outcome.receipts {
+        update_len_prefixed(&mut hasher, r.invocation_id.as_bytes());
+        update_len_prefixed(&mut hasher, r.outcome.as_bytes());
+        update_len_prefixed(&mut hasher, r.resource_identity.as_bytes());
+        update_len_prefixed(&mut hasher, r.relative_path.as_bytes());
+        hasher.update(r.byte_range.0.to_le_bytes());
+        hasher.update(r.byte_range.1.to_le_bytes());
+        match r.line_range {
+            Some((s, e)) => {
+                hasher.update([1u8]);
+                hasher.update(s.to_le_bytes());
+                hasher.update(e.to_le_bytes());
+            }
+            None => hasher.update([0u8]),
+        }
+        update_len_prefixed(&mut hasher, r.excerpt_sha256.as_bytes());
+        hasher.update([r.truncated as u8]);
+        match &r.error_code {
+            Some(err) => {
+                hasher.update([1u8]);
+                update_len_prefixed(&mut hasher, err.as_bytes());
+            }
+            None => hasher.update([0u8]),
+        }
+    }
+
+    hasher.update(outcome.turns_used.to_le_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Verify that an `AgentRunOutcome` matches its cryptographic attestation digest.
+pub fn verify_agent_run_outcome(outcome: &AgentRunOutcome) -> Result<(), LoraError> {
+    let expected = compute_agent_run_digest(outcome);
+    match &outcome.outcome_sha256 {
+        Some(digest) if digest == &expected => Ok(()),
+        Some(mismatch) => Err(LoraError::PolicyDenied(format!(
+            "agent run outcome digest mismatch: expected {expected}, got {mismatch}"
+        ))),
+        None => Err(LoraError::MalformedArtifact(
+            "agent run outcome missing cryptographic digest".to_string(),
+        )),
+    }
 }
 
 pub const MAX_VERIFY_DIGEST_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB bounded read cap
@@ -2041,4 +2132,78 @@ pub fn execute_workflow_job_cancellable(
     };
     receipt.receipt_sha256 = compute_workflow_receipt_digest(&receipt);
     Ok(receipt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_run_outcome_attestation_and_tamper_detection() {
+        let citation = CitedEvidence {
+            relative_path: "docs/ARCHITECTURE.md".to_string(),
+            line_range: Some((1, 10)),
+            byte_range: (0, 256),
+            excerpt_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            truncated: false,
+        };
+        let receipt = ToolReceipt {
+            invocation_id: "inv-001".to_string(),
+            outcome: "succeeded".to_string(),
+            resource_identity: "ws-root/docs/ARCHITECTURE.md".to_string(),
+            relative_path: "docs/ARCHITECTURE.md".to_string(),
+            byte_range: (0, 256),
+            line_range: Some((1, 10)),
+            excerpt_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            truncated: false,
+            error_code: None,
+        };
+        let mut outcome = AgentRunOutcome {
+            run_id: "run-test-42".to_string(),
+            final_state: RunState::Succeeded,
+            answer: "Here is the verified answer based on ARCHITECTURE.md".to_string(),
+            citations: vec![citation],
+            receipts: vec![receipt],
+            turns_used: 1,
+            outcome_sha256: None,
+        };
+
+        let digest = compute_agent_run_digest(&outcome);
+        assert_eq!(digest.len(), 64);
+        outcome.outcome_sha256 = Some(digest);
+
+        // Valid outcome passes verification
+        assert!(verify_agent_run_outcome(&outcome).is_ok());
+
+        // Tampered answer fails closed
+        let mut bad_answer = outcome.clone();
+        bad_answer.answer = "tampered text injected by adversary".to_string();
+        assert!(verify_agent_run_outcome(&bad_answer).is_err());
+
+        // Tampered citations fail closed
+        let mut bad_citations = outcome.clone();
+        bad_citations.citations.clear();
+        assert!(verify_agent_run_outcome(&bad_citations).is_err());
+
+        // Tampered turns_used fails closed
+        let mut bad_turns = outcome.clone();
+        bad_turns.turns_used = 99;
+        assert!(verify_agent_run_outcome(&bad_turns).is_err());
+
+        // Missing digest fails closed
+        let mut missing_digest = outcome.clone();
+        missing_digest.outcome_sha256 = None;
+        assert!(verify_agent_run_outcome(&missing_digest).is_err());
+    }
+
+    #[test]
+    fn test_domain_constants_separation() {
+        assert_eq!(AGENT_RUN_DOMAIN_V1, b"lora.agent.run.v1\0");
+        assert_eq!(WORKFLOW_CONFIG_DOMAIN_V1, b"lora.workflow.config.v1\0");
+        assert_eq!(WORKFLOW_RECEIPT_DOMAIN_V1, b"lora.workflow.receipt.v1\0");
+        assert_eq!(WORKFLOW_BUNDLE_DOMAIN_V1, b"lora.workflow.bundle.v1\0");
+        assert_ne!(AGENT_RUN_DOMAIN_V1, WORKFLOW_CONFIG_DOMAIN_V1);
+    }
 }

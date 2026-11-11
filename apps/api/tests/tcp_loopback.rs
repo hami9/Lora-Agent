@@ -149,7 +149,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "68",
+            "70",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -1155,6 +1155,44 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r68.starts_with("HTTP/1.1 200 OK"));
     assert!(r68.contains("\"verified\":true"));
     assert!(r68.contains("\"domain\":\"lora.desktop.snapshot.v1\""));
+
+    // (bn) POST /v1/agent/verify-outcome verifies valid AgentRunOutcome attestation
+    let citation = lora_core::CitedEvidence {
+        relative_path: "docs/ARCHITECTURE.md".to_string(),
+        line_range: Some((1, 10)),
+        byte_range: (0, 256),
+        excerpt_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .to_string(),
+        truncated: false,
+    };
+    let mut outcome = lora_core::AgentRunOutcome {
+        run_id: "run-api-outcome-test".to_string(),
+        final_state: lora_core::RunState::Succeeded,
+        answer: "Verified answer for API test".to_string(),
+        citations: vec![citation],
+        receipts: Vec::new(),
+        turns_used: 1,
+        outcome_sha256: None,
+    };
+    outcome.outcome_sha256 = Some(lora_core::compute_agent_run_digest(&outcome));
+    let body_outcome_ok = serde_json::to_string(&outcome).unwrap();
+    let r69 = send_http(&format!(
+        "POST /v1/agent/verify-outcome HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_outcome_ok}",
+        body_outcome_ok.len()
+    ));
+    assert!(r69.starts_with("HTTP/1.1 200 OK"));
+    assert!(r69.contains("\"verified\":true"));
+    assert!(r69.contains("\"domain\":\"lora.agent.run.v1\""));
+
+    // (bo) POST /v1/agent/verify-outcome rejects tampered AgentRunOutcome
+    outcome.answer = "tampered adversary content".to_string();
+    let body_outcome_bad = serde_json::to_string(&outcome).unwrap();
+    let r70 = send_http(&format!(
+        "POST /v1/agent/verify-outcome HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_outcome_bad}",
+        body_outcome_bad.len()
+    ));
+    assert!(r70.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(r70.contains("\"verified\":false"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());

@@ -279,7 +279,8 @@ fn route_request(
                 "adapter_attestation": true,
                 "qualification_attestation": true,
                 "benchmark_attestation": true,
-                "desktop_attestation": true
+                "desktop_attestation": true,
+                "agent_run_attestation": true
             });
             HttpResponse::json(&status)
         }

@@ -1578,6 +1578,7 @@ fn cli_rag_grounded_ask_and_multi_turn_chat_history() {
     .success());
 
     // 1. RAG-grounded ask answers from retrieved FTS5 evidence even with tool calls denied
+    let exported_outcome = tmp.path().join("exported_ask_outcome.json");
     let ask = run(&[
         "ask",
         "--model",
@@ -1588,6 +1589,8 @@ fn cli_rag_grounded_ask_and_multi_turn_chat_history() {
         "What is the lattice deployment CONFIG_VALUE AND rollout?",
         "--deny",
         "--use-rag",
+        "--export-outcome",
+        exported_outcome.to_str().unwrap(),
     ]);
     let ask_stdout = String::from_utf8_lossy(&ask.stdout);
     assert!(
@@ -1597,6 +1600,26 @@ fn cli_rag_grounded_ask_and_multi_turn_chat_history() {
     );
     assert!(ask_stdout.contains("amber_lattice_42"), "{ask_stdout}");
     assert!(ask_stdout.contains("Citation: deploy.md"), "{ask_stdout}");
+    assert!(
+        ask_stdout.contains("Exported agent run outcome to"),
+        "{ask_stdout}"
+    );
+
+    let verify_exported = run(&[
+        "ask",
+        "--verify-outcome",
+        exported_outcome.to_str().unwrap(),
+    ]);
+    assert!(
+        verify_exported.status.success(),
+        "ask --verify-outcome failed: {}",
+        String::from_utf8_lossy(&verify_exported.stderr)
+    );
+    let verify_exported_stdout = String::from_utf8_lossy(&verify_exported.stdout);
+    assert!(
+        verify_exported_stdout.contains("Agent Run Outcome Attestation: verified"),
+        "{verify_exported_stdout}"
+    );
 
     // 2. Chat history is persisted and prior turns are admitted on the next turn
     let history = tmp.path().join("history.json");
@@ -3525,4 +3548,93 @@ fn test_desktop_snapshot_attestation_cli() {
     assert!(!bad_verify_out.status.success());
     let bad_stderr = String::from_utf8_lossy(&bad_verify_out.stderr);
     assert!(bad_stderr.contains("desktop snapshot digest mismatch"));
+}
+
+#[test]
+fn test_agent_run_outcome_attestation_cli() {
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().unwrap();
+
+    let citation = lora_core::CitedEvidence {
+        relative_path: "docs/AGENT_RUNTIME.md".to_string(),
+        line_range: Some((1, 20)),
+        byte_range: (0, 512),
+        excerpt_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .to_string(),
+        truncated: false,
+    };
+    let receipt = lora_core::ToolReceipt {
+        invocation_id: "inv-cli-turn1".to_string(),
+        outcome: "succeeded".to_string(),
+        resource_identity: "ws-root/docs/AGENT_RUNTIME.md".to_string(),
+        relative_path: "docs/AGENT_RUNTIME.md".to_string(),
+        byte_range: (0, 512),
+        line_range: Some((1, 20)),
+        excerpt_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .to_string(),
+        truncated: false,
+        error_code: None,
+    };
+    let mut outcome = lora_core::AgentRunOutcome {
+        run_id: "run-cli-test-attest".to_string(),
+        final_state: lora_core::RunState::Succeeded,
+        answer: "Attested answer verified by agent runtime".to_string(),
+        citations: vec![citation],
+        receipts: vec![receipt],
+        turns_used: 1,
+        outcome_sha256: None,
+    };
+    outcome.outcome_sha256 = Some(lora_core::compute_agent_run_digest(&outcome));
+
+    let outcome_path = tmp.path().join("outcome.json");
+    fs::write(
+        &outcome_path,
+        serde_json::to_string_pretty(&outcome).unwrap(),
+    )
+    .unwrap();
+
+    // 1. Valid outcome passes verification via CLI
+    let verify_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "ask",
+            "--verify-outcome",
+            outcome_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        verify_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&verify_out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&verify_out.stdout);
+    assert!(stdout.contains("Agent Run Outcome Attestation: verified"));
+    assert!(stdout.contains("citations: 1"));
+    assert!(stdout.contains("turns: 1"));
+
+    // 2. Tampered outcome fails closed
+    let mut bad_outcome = outcome.clone();
+    bad_outcome.answer = "tampered malicious response".to_string();
+    let bad_path = tmp.path().join("bad_outcome.json");
+    fs::write(
+        &bad_path,
+        serde_json::to_string_pretty(&bad_outcome).unwrap(),
+    )
+    .unwrap();
+
+    let bad_verify_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "ask",
+            "--verify-outcome",
+            bad_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!bad_verify_out.status.success());
+    let bad_stderr = String::from_utf8_lossy(&bad_verify_out.stderr);
+    assert!(bad_stderr.contains("agent run outcome digest mismatch"));
 }

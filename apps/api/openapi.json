@@ -492,6 +492,19 @@
         }
       }
     },
+    "/v1/agent/verify-outcome": {
+      "post": {
+        "summary": "Verify domain-separated cryptographic attestation digest (lora.agent.run.v1) of an AgentRunOutcome",
+        "responses": {
+          "200": {
+            "description": "AgentRunOutcome cryptographic attestation verified successfully"
+          },
+          "400": {
+            "description": "AgentRunOutcome malformed, missing digest, or tamper detected"
+          }
+        }
+      }
+    },
     "/v1/workflow/run": {
       "post": {
         "summary": "Execute multi-phase workflow pipeline with optional deadline timeout gating (max_duration_ms), transient failure retries (max_step_retries), non-fatal steps, and cryptographic verify_digest steps",

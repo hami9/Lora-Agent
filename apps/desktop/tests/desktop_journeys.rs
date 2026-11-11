@@ -215,6 +215,7 @@ fn desktop_loopback_bridge_serves_ui_and_view_models() {
     assert!(head.contains("frame-ancestors 'none'"));
     assert!(head.contains("X-Content-Type-Options: nosniff"));
     assert!(body.contains("screen-dashboard"));
+    assert!(body.contains("Agent Run Attestation"));
 
     // 2. Dashboard view-model JSON
     let (head, body) = get("/api/dashboard");
@@ -287,6 +288,7 @@ fn desktop_loopback_bridge_serves_ui_and_view_models() {
     assert!(body.contains("grounded_query"));
     assert!(body.contains("doctor_probe"));
     assert!(body.contains("\"deadline_gating\": true"));
+    assert!(body.contains("\"agent_run_attestation\": true"));
 
     // 14. Workflow execution receipts history endpoint
     let (head, body) = get("/api/workflow-receipts");

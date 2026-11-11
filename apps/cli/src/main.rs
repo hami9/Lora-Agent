@@ -8,19 +8,20 @@ use lora_core::{
     execute_workflow_job_cancellable, format_multi_turn_prompt, now_epoch_ms,
     prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
     validate_catalog_variant, validate_specialist_handoff, validate_workflow_job,
-    verify_adapter_studio_outcome, verify_audit_attestation_bundle, verify_benchmark_receipt,
-    verify_compensating_patch_receipt, verify_dataset_split_manifest, verify_desktop_snapshot,
-    verify_qualification_report, verify_receipt_self_integrity, verify_rollback_drill_receipt,
-    verify_tuning_receipt, verify_workflow_attestation_bundle, verify_workflow_receipt,
-    AdapterStudioOutcome, AgentLimits, ApprovalDecision, ApprovalPromptPort, ApprovalRequest,
-    AuditAttestationBundle, BenchmarkReceipt, BrokerSingleUsePermit, BrokerVerb,
-    CatalogVariantDescriptor, ChatTurn, CompensatingPatchReceipt, ContextBudgetRequest,
-    DatasetSplitManifest, DesktopSnapshot, ExecutionMode, ExecutionPermit, ExtensionManifestV1,
-    HardwareProbePort, HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig,
-    PatchProposal, PrivilegedBrokerGate, QualificationReport, SpecialistHandoffEnvelope,
-    TrainingExample, TuningCacheKey, TuningProfile, TuningReceipt, TuningTrialSample,
-    UpdateRollbackDrillReceipt, WorkflowAttestationBundle, WorkflowJobConfig, WorkflowStepKind,
-    DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
+    verify_adapter_studio_outcome, verify_agent_run_outcome, verify_audit_attestation_bundle,
+    verify_benchmark_receipt, verify_compensating_patch_receipt, verify_dataset_split_manifest,
+    verify_desktop_snapshot, verify_qualification_report, verify_receipt_self_integrity,
+    verify_rollback_drill_receipt, verify_tuning_receipt, verify_workflow_attestation_bundle,
+    verify_workflow_receipt, AdapterStudioOutcome, AgentLimits, AgentRunOutcome, ApprovalDecision,
+    ApprovalPromptPort, ApprovalRequest, AuditAttestationBundle, BenchmarkReceipt,
+    BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor, ChatTurn,
+    CompensatingPatchReceipt, ContextBudgetRequest, DatasetSplitManifest, DesktopSnapshot,
+    ExecutionMode, ExecutionPermit, ExtensionManifestV1, HardwareProbePort,
+    HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig, PatchProposal,
+    PrivilegedBrokerGate, QualificationReport, SpecialistHandoffEnvelope, TrainingExample,
+    TuningCacheKey, TuningProfile, TuningReceipt, TuningTrialSample, UpdateRollbackDrillReceipt,
+    WorkflowAttestationBundle, WorkflowJobConfig, WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES,
+    TERMINAL_ASCII_BANNER,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -183,14 +184,14 @@ enum Commands {
     /// Run Read-only Assistant mode with a scoped local directory and human approval gate
     Ask {
         /// Model alias, revision ID, or SHA-256 digest
-        #[arg(long)]
-        model: String,
+        #[arg(long, required_unless_present = "verify_outcome")]
+        model: Option<String>,
         /// Approved local directory scope
-        #[arg(long)]
-        scope: PathBuf,
+        #[arg(long, required_unless_present = "verify_outcome")]
+        scope: Option<PathBuf>,
         /// User question about files inside the scope
-        #[arg(long)]
-        prompt: String,
+        #[arg(long, required_unless_present = "verify_outcome")]
+        prompt: Option<String>,
         /// Requested context window in tokens
         #[arg(long, default_value_t = 2048)]
         context: u32,
@@ -203,6 +204,12 @@ enum Commands {
         /// Ground the answer with pre-run SQLite FTS5 retrieval over indexed local memory
         #[arg(long)]
         use_rag: bool,
+        /// Optional output file path to export the verified AgentRunOutcome JSON
+        #[arg(long)]
+        export_outcome: Option<PathBuf>,
+        /// Optional path to an AgentRunOutcome JSON file to verify cryptographic attestation
+        #[arg(long)]
+        verify_outcome: Option<PathBuf>,
     },
 
     /// Inspect, export, or prune redacted local audit events (`docs/SECURITY_ARCHITECTURE.md`, `R17`)
@@ -994,8 +1001,42 @@ fn run_cli() {
             prompt,
             context,
             use_rag,
+            export_outcome,
+            verify_outcome,
             ..
         } => {
+            if let Some(verify_path) = verify_outcome {
+                let content = std::fs::read_to_string(&verify_path)
+                    .map_err(|e| LoraError::Io(format!("failed to read outcome file: {e}")))?;
+                let outcome: AgentRunOutcome = serde_json::from_str(&content).map_err(|e| {
+                    LoraError::MalformedArtifact(format!("invalid AgentRunOutcome JSON: {e}"))
+                })?;
+                verify_agent_run_outcome(&outcome)?;
+                println!(
+                    "Agent Run Outcome Attestation: verified (digest: {}, citations: {}, turns: {})",
+                    outcome.outcome_sha256.as_deref().unwrap_or("none"),
+                    outcome.citations.len(),
+                    outcome.turns_used
+                );
+                return Ok(());
+            }
+
+            let model = model.ok_or_else(|| {
+                LoraError::MalformedArtifact(
+                    "--model is required unless --verify-outcome is provided".into(),
+                )
+            })?;
+            let scope = scope.ok_or_else(|| {
+                LoraError::MalformedArtifact(
+                    "--scope is required unless --verify-outcome is provided".into(),
+                )
+            })?;
+            let prompt = prompt.ok_or_else(|| {
+                LoraError::MalformedArtifact(
+                    "--prompt is required unless --verify-outcome is provided".into(),
+                )
+            })?;
+
             let run_id = format!("run-ask-{}", now_epoch_ms());
             let (_plan, outcome) = app.run_rag_task(
                 &run_id,
@@ -1025,6 +1066,14 @@ fn run_cli() {
                     c.byte_range.1,
                     &c.excerpt_sha256[..16]
                 );
+            }
+            if let Some(export_path) = export_outcome {
+                let json = serde_json::to_string_pretty(&outcome).map_err(|e| {
+                    LoraError::MalformedArtifact(format!("failed to serialize outcome: {e}"))
+                })?;
+                std::fs::write(&export_path, json)
+                    .map_err(|e| LoraError::Io(format!("failed to write outcome file: {e}")))?;
+                println!("Exported agent run outcome to {}", export_path.display());
             }
             Ok(())
         }
