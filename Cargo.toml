@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.23"
+version = "0.2.24"
 edition = "2021"
 publish = false
 repository = "https://github.com/hami9/Lora-Agent"
@@ -32,4 +32,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 sysinfo = "0.33"
 tempfile = "3.13"
-iced = { version = "0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "crisp", "tokio", "markdown", "advanced-shaping", "x11", "wayland"] }
+iced = { version = "0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "crisp", "tokio", "markdown", "image-without-codecs", "canvas", "advanced-shaping", "x11", "wayland"] }

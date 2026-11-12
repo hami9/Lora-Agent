@@ -1,4 +1,4 @@
-//! Pure-Rust native Discord-style desktop client (`lora-desktop`) with headless CI diagnostic flags.
+//! Pure-Rust native multi-pane desktop client (`lora-desktop`) with headless CI diagnostic flags.
 
 use clap::Parser;
 use iced::{window, Size};
@@ -8,7 +8,7 @@ use lora_core::{
 };
 use lora_desktop::app::LoraDesktopApp;
 use lora_desktop::backend::{AppWorkerEvent, DenyByDefaultDesktopPrompt, GuiApprovalPromptPort};
-use lora_desktop::build_consent_preview;
+use lora_desktop::{build_consent_preview, load_window_icon};
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
 };
@@ -19,7 +19,7 @@ use std::sync::{mpsc, Arc, Mutex};
 #[command(
     name = "lora-desktop",
     version,
-    about = "Lora Agent pure-Rust native Discord-style desktop client"
+    about = "Lora Agent pure-Rust native cyberpunk desktop client"
 )]
 struct DesktopCli {
     /// Per-user data directory
@@ -185,7 +185,7 @@ fn main() {
         return;
     }
 
-    // Interactive Pure-Rust Native GUI Mode (Discord-style client via iced 0.14.0)
+    // Interactive Pure-Rust Native GUI Mode (multi-pane HUD client via iced 0.14.0)
     let (event_tx, event_rx) = mpsc::channel::<AppWorkerEvent>();
     let approval_port = Arc::new(GuiApprovalPromptPort::new(event_tx.clone()));
     let service = match LoraApplicationService::open(
@@ -229,6 +229,8 @@ fn main() {
     .window(window::Settings {
         size: Size::new(1380.0, 860.0),
         min_size: Some(Size::new(980.0, 620.0)),
+        visible: true,
+        icon: load_window_icon(),
         ..Default::default()
     })
     .centered()

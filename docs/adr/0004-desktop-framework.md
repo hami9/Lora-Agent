@@ -8,7 +8,7 @@ The project needs an ultra-fast, low-memory, accessible desktop client with tran
 
 ## Decision
 
-Implement `lora-desktop` directly in **100% pure Rust using `iced 0.14`** (`wgpu` GPU renderer with pure-Rust `tiny-skia` CPU fallback, native progressive `markdown` streaming, and `cosmic-text` RTL/Unicode shaping) using a multi-pane Discord-style workspace layout. Bind `LoraApplicationService` and `GuiApprovalPromptPort` directly in-process. Trusted prompts render non-spoofable fields from `TrustedConsentDialogViewModel`, default safely to `Deny`, and never execute or parse untrusted HTML/CSS/JavaScript.
+Implement `lora-desktop` directly in **100% pure Rust using `iced 0.14`** (`wgpu` GPU renderer with pure-Rust `tiny-skia` CPU fallback, native progressive `markdown` streaming, and `cosmic-text` RTL/Unicode shaping) using a multi-pane cyberpunk workspace layout. Bind `LoraApplicationService` and `GuiApprovalPromptPort` directly in-process. Trusted prompts render non-spoofable fields from `TrustedConsentDialogViewModel`, default safely to `Deny`, and never execute or parse untrusted HTML/CSS/JavaScript.
 
 ## Alternatives
 

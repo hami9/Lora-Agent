@@ -52,6 +52,11 @@ pub enum AppWorkerEvent {
         run_id: String,
         result: Result<CompletedRunSummary, String>,
     },
+    ApiRunFinished {
+        run_id: String,
+        model_label: String,
+        result: Result<String, String>,
+    },
     ModelImported {
         result: Result<String, String>,
     },
@@ -260,6 +265,114 @@ pub fn spawn_chat_run(
         let _ = event_tx.send(AppWorkerEvent::RunFinished {
             run_id,
             result: mapped,
+        });
+    });
+}
+
+/// Spawn a non-blocking OpenAI-compatible API request when the user switches Execution Mode to `API`.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_api_chat_run(
+    event_tx: mpsc::Sender<AppWorkerEvent>,
+    run_id: String,
+    base_url: String,
+    model_name: String,
+    api_key: String,
+    prompt: String,
+    effort_code: String,
+    cancel_flag: Arc<AtomicBool>,
+) {
+    thread::spawn(move || {
+        if cancel_flag.load(Ordering::SeqCst) {
+            let _ = event_tx.send(AppWorkerEvent::ApiRunFinished {
+                run_id,
+                model_label: model_name,
+                result: Err("Cancelled before API dispatch.".to_string()),
+            });
+            return;
+        }
+        let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+        let payload = serde_json::json!({
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "reasoning_effort": effort_code,
+        });
+        let body = payload.to_string();
+
+        let mut cmd = std::process::Command::new("curl");
+        cmd.args([
+            "-sS",
+            "--max-time",
+            "60",
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            &format!("Authorization: Bearer {api_key}"),
+            "--data-binary",
+            "@-",
+            &endpoint,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let res = (|| -> Result<String, String> {
+            use std::io::Write;
+            let mut child = cmd
+                .spawn()
+                .map_err(|e| format!("Failed to invoke curl for API request: {e}"))?;
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(body.as_bytes());
+            }
+            let out = child
+                .wait_with_output()
+                .map_err(|e| format!("API transport failed: {e}"))?;
+            if cancel_flag.load(Ordering::SeqCst) {
+                return Err("API request cancelled by user.".to_string());
+            }
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                return Err(if err.is_empty() {
+                    format!("API HTTP curl exit {}", out.status)
+                } else {
+                    err
+                });
+            }
+            let raw = String::from_utf8_lossy(&out.stdout).to_string();
+            let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|_| {
+                format!(
+                    "Non-JSON API response: {}",
+                    raw.chars().take(220).collect::<String>()
+                )
+            })?;
+            if let Some(err_msg) = parsed
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+            {
+                return Err(format!("API Error: {err_msg}"));
+            }
+            let text = parsed
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(|t| t.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| "API response missing choices[0].message.content".to_string())?;
+            Ok(text)
+        })();
+
+        let _ = event_tx.send(AppWorkerEvent::ApiRunFinished {
+            run_id,
+            model_label: model_name,
+            result: res,
         });
     });
 }

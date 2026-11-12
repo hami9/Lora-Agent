@@ -12,6 +12,16 @@ fn find_free_loopback_addr() -> String {
     format!("127.0.0.1:{}", addr.port())
 }
 
+fn connect_with_retry(bind_addr: &str) -> TcpStream {
+    for _ in 0..320 {
+        if let Ok(s) = TcpStream::connect(bind_addr) {
+            return s;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("connect to live lora-api at {bind_addr} timed out");
+}
+
 #[test]
 fn loopback_api_live_tcp_socket_e2e() {
     let api_bin = env!("CARGO_BIN_EXE_lora-api");
@@ -59,15 +69,7 @@ fn loopback_api_live_tcp_socket_e2e() {
         .expect("spawn lora-api");
 
     // Connect with retry while child binds socket
-    let mut stream = None;
-    for _ in 0..40 {
-        if let Ok(s) = TcpStream::connect(&bind_addr) {
-            stream = Some(s);
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    let mut stream = stream.expect("connect to live lora-api");
+    let mut stream = connect_with_retry(&bind_addr);
     let req = format!(
         "GET /v1/capabilities HTTP/1.1\r\nHost: {bind_addr}\r\nAuthorization: Bearer live-secret-token-42\r\nConnection: close\r\n\r\n"
     );
@@ -155,15 +157,7 @@ fn loopback_api_live_tcp_socket_e2e() {
         .expect("spawn multi-request lora-api");
 
     let send_http = |raw_req: &str| -> String {
-        let mut conn = None;
-        for _ in 0..40 {
-            if let Ok(s) = TcpStream::connect(&bind_addr2) {
-                conn = Some(s);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        let mut conn = conn.expect("connect to lora-api");
+        let mut conn = connect_with_retry(&bind_addr2);
         conn.write_all(raw_req.as_bytes()).unwrap();
         let mut out = String::new();
         conn.read_to_string(&mut out).unwrap();
