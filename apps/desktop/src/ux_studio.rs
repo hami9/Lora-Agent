@@ -1585,30 +1585,49 @@ pub fn view_artifact_drawer<'a>(
         .into()
 }
 
-/// Optional non-blocking native Windows toast notification when long runs finish.
+/// Optional non-blocking native desktop toast notification when long runs finish.
 pub fn notify_desktop_completion(enabled: bool, title: &str, body: &str) {
-    if !enabled || cfg!(test) {
-        return;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let title_clean = title.replace('\'', "");
-        let body_clean: String = body.chars().take(120).collect::<String>().replace('\'', "");
+    if enabled && !cfg!(test) {
+        let title_clean = title.replace(['\'', '"', '\\'], "");
+        let body_clean: String = body
+            .chars()
+            .take(120)
+            .collect::<String>()
+            .replace(['\'', '"', '\\'], "");
         std::thread::spawn(move || {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            let script = format!(
-                "Add-Type -AssemblyName System.Windows.Forms; \
-                 $n = New-Object System.Windows.Forms.NotifyIcon; \
-                 $n.Icon = [System.Drawing.SystemIcons]::Information; \
-                 $n.Visible = $true; \
-                 $n.ShowBalloonTip(3000, '{title_clean}', '{body_clean}', [System.Windows.Forms.ToolTipIcon]::Info); \
-                 Start-Sleep -Seconds 3; $n.Dispose()"
-            );
-            let _ = std::process::Command::new("powershell")
-                .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                let script = format!(
+                    "Add-Type -AssemblyName System.Windows.Forms; \
+                     $n = New-Object System.Windows.Forms.NotifyIcon; \
+                     $n.Icon = [System.Drawing.SystemIcons]::Information; \
+                     $n.Visible = $true; \
+                     $n.ShowBalloonTip(3000, '{title_clean}', '{body_clean}', [System.Windows.Forms.ToolTipIcon]::Info); \
+                     Start-Sleep -Seconds 3; $n.Dispose()"
+                );
+                let _ = std::process::Command::new("powershell")
+                    .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let script =
+                    format!("display notification \"{body_clean}\" with title \"{title_clean}\"");
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", &script])
+                    .output();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let _ = std::process::Command::new("notify-send")
+                    .args([&title_clean, &body_clean])
+                    .output();
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+            let _ = (&title_clean, &body_clean);
         });
     }
 }
