@@ -1665,6 +1665,7 @@ dependencies = [
  "lora-core",
  "lora-platform",
  "lora-protocol",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

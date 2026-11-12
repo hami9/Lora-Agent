@@ -2,7 +2,8 @@
 
 use crate::app::{ChannelTab, LoraDesktopApp, Message};
 use crate::backend::CoreTelemetry;
-use crate::theme::{self, CyberPalette, CyberThemePreset, HudGeometry};
+use crate::theme::{self, CustomThemeSpec, CyberPalette, CyberThemePreset, HudGeometry};
+use crate::ux_studio::SpringFloat;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
     button, canvas, checkbox, column, container, progress_bar, row, rule, scrollable, slider,
@@ -15,8 +16,9 @@ use iced::{
 use lora_core::TuningProfile;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 const HUD_PREFS_FILENAME: &str = "dashboard_hud.json";
 const TELEMETRY_HISTORY_CAP: usize = 48;
@@ -138,6 +140,7 @@ impl DashboardPreset {
             ],
             Self::OperatorHud => vec![
                 WidgetSlot::new(DashboardWidgetKind::CommandDeck, true, WidgetSpan::Wide),
+                WidgetSlot::new(DashboardWidgetKind::CapriCompanion, true, WidgetSpan::Half),
                 WidgetSlot::new(DashboardWidgetKind::SystemReactor, true, WidgetSpan::Half),
                 WidgetSlot::new(
                     DashboardWidgetKind::TelemetrySparkline,
@@ -173,6 +176,7 @@ impl DashboardPreset {
                 WidgetSlot::new(DashboardWidgetKind::WorkflowMatrix, true, WidgetSpan::Half),
                 WidgetSlot::new(DashboardWidgetKind::ModelArsenal, true, WidgetSpan::Half),
                 WidgetSlot::new(DashboardWidgetKind::CommandDeck, true, WidgetSpan::Wide),
+                WidgetSlot::new(DashboardWidgetKind::CapriCompanion, false, WidgetSpan::Half),
                 WidgetSlot::new(
                     DashboardWidgetKind::WorkspaceShield,
                     false,
@@ -186,6 +190,7 @@ impl DashboardPreset {
             ],
             Self::DevStudio => vec![
                 WidgetSlot::new(DashboardWidgetKind::CommandDeck, true, WidgetSpan::Wide),
+                WidgetSlot::new(DashboardWidgetKind::CapriCompanion, true, WidgetSpan::Wide),
                 WidgetSlot::new(DashboardWidgetKind::WorkspaceShield, true, WidgetSpan::Half),
                 WidgetSlot::new(DashboardWidgetKind::ModelArsenal, true, WidgetSpan::Half),
                 WidgetSlot::new(
@@ -214,6 +219,7 @@ impl DashboardPreset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DashboardWidgetKind {
     CommandDeck,
+    CapriCompanion,
     SystemReactor,
     TelemetrySparkline,
     ModelArsenal,
@@ -224,8 +230,9 @@ pub enum DashboardWidgetKind {
 }
 
 impl DashboardWidgetKind {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::CommandDeck,
+        Self::CapriCompanion,
         Self::SystemReactor,
         Self::TelemetrySparkline,
         Self::ModelArsenal,
@@ -238,6 +245,7 @@ impl DashboardWidgetKind {
     pub fn title(self) -> &'static str {
         match self {
             Self::CommandDeck => "COMMAND OMNIBAR",
+            Self::CapriCompanion => "CAPRI × LORA WIDGET",
             Self::SystemReactor => "SYSTEM REACTOR",
             Self::TelemetrySparkline => "MEMORY WAVEFORM",
             Self::ModelArsenal => "MODEL ARSENAL",
@@ -251,6 +259,7 @@ impl DashboardWidgetKind {
     pub fn code(self) -> &'static str {
         match self {
             Self::CommandDeck => "CMD-01",
+            Self::CapriCompanion => "CAP-09",
             Self::SystemReactor => "SYS-02",
             Self::TelemetrySparkline => "TLM-03",
             Self::ModelArsenal => "MDL-04",
@@ -258,6 +267,148 @@ impl DashboardWidgetKind {
             Self::WorkflowMatrix => "PIP-06",
             Self::AttestationRadar => "SHA-07",
             Self::OperatorScratchpad => "MCR-08",
+        }
+    }
+}
+
+/// Curated aura palettes for the Capri × Lora Glitch-Cyber companion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CapriAuraPreset {
+    #[default]
+    ClassicGlitch,
+    CyberGold,
+    PhantomViolet,
+    IceReactor,
+    CustomHue,
+}
+
+impl CapriAuraPreset {
+    pub const ALL: [Self; 5] = [
+        Self::ClassicGlitch,
+        Self::CyberGold,
+        Self::PhantomViolet,
+        Self::IceReactor,
+        Self::CustomHue,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ClassicGlitch => "Crimson × Toxic",
+            Self::CyberGold => "Solar × Lime",
+            Self::PhantomViolet => "Violet × Mint",
+            Self::IceReactor => "Frost × Neon",
+            Self::CustomHue => "Custom Hues",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::ClassicGlitch => Self::CyberGold,
+            Self::CyberGold => Self::PhantomViolet,
+            Self::PhantomViolet => Self::IceReactor,
+            Self::IceReactor => Self::CustomHue,
+            Self::CustomHue => Self::ClassicGlitch,
+        }
+    }
+}
+
+/// Eye expression override mode for the Capri companion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CapriEyeMode {
+    #[default]
+    Dynamic,
+    DoubleBlue,
+    CrossGlitch,
+    Hypno,
+}
+
+impl CapriEyeMode {
+    pub const ALL: [Self; 4] = [
+        Self::Dynamic,
+        Self::DoubleBlue,
+        Self::CrossGlitch,
+        Self::Hypno,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dynamic => "Dynamic",
+            Self::DoubleBlue => "Dual O",
+            Self::CrossGlitch => "O + X",
+            Self::Hypno => "Hyper X",
+        }
+    }
+}
+
+/// Full visual & widget customization profile for the Capri companion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CapriStyleSpec {
+    pub aura_preset: CapriAuraPreset,
+    pub crown_hue: u16,
+    pub visor_hue: u16,
+    pub glitch_intensity_pct: u8,
+    pub show_aura_shards: bool,
+    pub show_lightning: bool,
+    pub always_toothy_grin: bool,
+    pub eye_mode: CapriEyeMode,
+    pub widget_scale_px: u16,
+    pub dock_widget_in_chat: bool,
+    pub floating_badge_chip: bool,
+}
+
+impl Default for CapriStyleSpec {
+    fn default() -> Self {
+        Self {
+            aura_preset: CapriAuraPreset::ClassicGlitch,
+            crown_hue: 342,
+            visor_hue: 148,
+            glitch_intensity_pct: 80,
+            show_aura_shards: true,
+            show_lightning: true,
+            always_toothy_grin: false,
+            eye_mode: CapriEyeMode::Dynamic,
+            widget_scale_px: 56,
+            dock_widget_in_chat: true,
+            floating_badge_chip: true,
+        }
+    }
+}
+
+impl CapriStyleSpec {
+    /// Resolve `(crown, visor, eye_blue, glitch_violet)` colors for `LoraMiniBotCanvas`.
+    pub fn resolve_colors(self, pal: CyberPalette) -> (Color, Color, Color, Color) {
+        match self.aura_preset {
+            CapriAuraPreset::ClassicGlitch => (
+                Color::from_rgb(1.0, 0.04, 0.36),
+                Color::from_rgb(0.0, 1.0, 0.48),
+                Color::from_rgb(0.05, 0.58, 1.0),
+                Color::from_rgb(0.52, 0.18, 0.98),
+            ),
+            CapriAuraPreset::CyberGold => (
+                Color::from_rgb(1.0, 0.72, 0.08),
+                Color::from_rgb(0.32, 1.0, 0.24),
+                Color::from_rgb(0.0, 0.85, 1.0),
+                pal.accent_primary,
+            ),
+            CapriAuraPreset::PhantomViolet => (
+                Color::from_rgb(0.68, 0.20, 1.0),
+                Color::from_rgb(0.16, 1.0, 0.76),
+                Color::from_rgb(0.95, 0.25, 0.78),
+                pal.accent_secondary,
+            ),
+            CapriAuraPreset::IceReactor => (
+                Color::from_rgb(0.06, 0.78, 1.0),
+                Color::from_rgb(0.68, 1.0, 0.14),
+                Color::from_rgb(0.12, 0.48, 1.0),
+                Color::from_rgb(1.0, 0.18, 0.56),
+            ),
+            CapriAuraPreset::CustomHue => (
+                theme::hsl_color(self.crown_hue as f32, 0.96, 0.54),
+                theme::hsl_color(self.visor_hue as f32, 0.96, 0.52),
+                pal.accent_secondary,
+                pal.accent_primary,
+            ),
         }
     }
 }
@@ -300,8 +451,25 @@ pub struct DashboardPreferences {
     pub geometry: HudGeometry,
     pub neon_borders: bool,
     pub show_sparkline_grid: bool,
+    pub custom_theme: CustomThemeSpec,
+    pub capri: CapriStyleSpec,
+    pub corner_radius_px: u8,
+    pub glow_strength_pct: u8,
+    pub sidebar_width_px: u16,
+    pub show_icon_rail: bool,
+    pub show_status_footer: bool,
+    pub use_mono_chrome: bool,
+    pub cyber_motion: bool,
+    #[serde(default = "default_true")]
+    pub native_notifications: bool,
+    #[serde(default = "default_true")]
+    pub show_mini_bot: bool,
     pub widgets: Vec<WidgetSlot>,
     pub custom_macros: Vec<PromptMacro>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for DashboardPreferences {
@@ -314,6 +482,17 @@ impl Default for DashboardPreferences {
             geometry: HudGeometry::SleekModern,
             neon_borders: true,
             show_sparkline_grid: true,
+            custom_theme: CustomThemeSpec::default(),
+            capri: CapriStyleSpec::default(),
+            corner_radius_px: 8,
+            glow_strength_pct: 65,
+            sidebar_width_px: 244,
+            show_icon_rail: true,
+            show_status_footer: true,
+            use_mono_chrome: false,
+            cyber_motion: true,
+            native_notifications: true,
+            show_mini_bot: true,
             widgets: DashboardPreset::OperatorHud.default_slots(),
             custom_macros: vec![
                 PromptMacro {
@@ -383,6 +562,54 @@ impl DashboardPreferences {
     }
 }
 
+/// Delta-time smoothed animation state for buttery 60 FPS theme morphing & cyberpunk micro-motion.
+#[derive(Debug, Clone)]
+pub struct MotionState {
+    pub palette: CyberPalette,
+    pub ram_ratio: f32,
+    pub sidebar_width: f32,
+    pub rail_width: f32,
+    pub radius_px: f32,
+    pub phase: f32,
+    pub channel_sweep: f32,
+    pub pulse_burst: f32,
+    pub spring_palette: SpringFloat,
+    pub spring_artifacts: SpringFloat,
+    pub spring_inspector: SpringFloat,
+    pub bot_bounce: SpringFloat,
+    last_frame_at: Instant,
+    last_telemetry_at: Instant,
+    pub settling: bool,
+}
+
+impl MotionState {
+    fn new(prefs: &DashboardPreferences, initial_ram: f32) -> Self {
+        let now = Instant::now();
+        let target_pal = if prefs.custom_theme.enabled {
+            prefs.custom_theme.build_palette()
+        } else {
+            prefs.theme_preset.palette()
+        };
+        Self {
+            palette: target_pal,
+            ram_ratio: (initial_ram * 0.65).clamp(0.03, 1.0),
+            sidebar_width: prefs.sidebar_width_px.clamp(210, 300) as f32,
+            rail_width: if prefs.show_icon_rail { 74.0 } else { 0.0 },
+            radius_px: prefs.corner_radius_px.min(18) as f32,
+            phase: 0.0,
+            channel_sweep: 1.0,
+            pulse_burst: 0.85,
+            spring_palette: SpringFloat::new(0.0, 280.0, 26.0),
+            spring_artifacts: SpringFloat::new(0.0, 240.0, 24.0),
+            spring_inspector: SpringFloat::new(0.0, 240.0, 24.0),
+            bot_bounce: SpringFloat::new(0.0, 340.0, 14.0),
+            last_frame_at: now,
+            last_telemetry_at: now,
+            settling: true,
+        }
+    }
+}
+
 /// Live runtime state for the customizable dashboard and vector telemetry canvases.
 #[derive(Debug, Clone)]
 pub struct DashboardState {
@@ -392,34 +619,208 @@ pub struct DashboardState {
     pub macro_label_input: String,
     pub macro_prompt_input: String,
     pub ram_history: VecDeque<f32>,
-    tick_counter: u64,
+    pub motion: MotionState,
 }
 
 impl DashboardState {
     pub fn new(initial_telemetry: &CoreTelemetry) -> Self {
+        let prefs = DashboardPreferences::default();
+        let total = initial_telemetry.dashboard.total_ram_mib.max(1) as f32;
+        let avail = (initial_telemetry.dashboard.available_ram_mib as f32).min(total);
+        let init_ram = ((total - avail) / total).clamp(0.02, 0.99);
         let mut state = Self {
-            prefs: DashboardPreferences::default(),
+            motion: MotionState::new(&prefs, init_ram),
+            prefs,
             customize_open: false,
             quick_prompt_input: String::new(),
             macro_label_input: String::new(),
             macro_prompt_input: String::new(),
             ram_history: VecDeque::with_capacity(TELEMETRY_HISTORY_CAP),
-            tick_counter: 0,
         };
         state.record_telemetry_sample(initial_telemetry);
         state
     }
 
+    /// Target palette resolved directly from active preset or custom Hue Matrix.
+    pub fn target_palette(&self) -> CyberPalette {
+        if self.prefs.custom_theme.enabled {
+            self.prefs.custom_theme.build_palette()
+        } else {
+            self.prefs.theme_preset.palette()
+        }
+    }
+
+    /// Snap visual motion caches to saved preferences on startup without interrupting entry sweep.
+    pub fn sync_motion_to_prefs(&mut self) {
+        self.motion.palette = self.target_palette();
+        self.motion.sidebar_width = self.prefs.sidebar_width_px.clamp(210, 300) as f32;
+        self.motion.rail_width = if self.prefs.show_icon_rail { 74.0 } else { 0.0 };
+        self.motion.radius_px = self.prefs.corner_radius_px.min(18) as f32;
+    }
+
     pub fn palette(&self) -> CyberPalette {
-        self.prefs.theme_preset.palette()
+        if self.prefs.cyber_motion {
+            self.motion.palette
+        } else {
+            self.target_palette()
+        }
+    }
+
+    pub fn active_theme_code(&self) -> &'static str {
+        if self.prefs.custom_theme.enabled {
+            "CUSTOM-RGB"
+        } else {
+            self.prefs.theme_preset.code()
+        }
     }
 
     pub fn card_radius(&self) -> f32 {
-        self.prefs.geometry.card_radius()
+        if self.prefs.cyber_motion {
+            self.motion.radius_px.clamp(0.0, 18.0)
+        } else {
+            self.prefs.corner_radius_px.min(18) as f32
+        }
     }
 
     pub fn control_radius(&self) -> f32 {
-        self.prefs.geometry.control_radius()
+        (self.card_radius() * 0.75).clamp(0.0, 12.0)
+    }
+
+    pub fn animated_sidebar_width(&self) -> f32 {
+        if self.prefs.cyber_motion {
+            self.motion.sidebar_width.clamp(210.0, 300.0)
+        } else {
+            self.prefs.sidebar_width_px.clamp(210, 300) as f32
+        }
+    }
+
+    pub fn animated_rail_width(&self) -> f32 {
+        if self.prefs.cyber_motion {
+            self.motion.rail_width.clamp(0.0, 74.0)
+        } else if self.prefs.show_icon_rail {
+            74.0
+        } else {
+            0.0
+        }
+    }
+
+    pub fn glow_breath(&self) -> f32 {
+        if !self.prefs.cyber_motion {
+            return 1.0;
+        }
+        let sine = 0.84 + 0.16 * (self.motion.phase * 1.7).sin();
+        (sine + self.motion.pulse_burst * 0.25).clamp(0.75, 1.35)
+    }
+
+    pub fn trigger_transition(&mut self) {
+        if self.prefs.cyber_motion {
+            self.motion.channel_sweep = 1.0;
+            self.motion.pulse_burst = 0.8;
+            self.motion.settling = true;
+        }
+    }
+
+    pub fn trigger_pulse(&mut self) {
+        if self.prefs.cyber_motion {
+            self.motion.pulse_burst = 1.0;
+            self.motion.settling = true;
+        }
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.prefs.cyber_motion && self.motion.settling
+    }
+
+    pub fn step_motion(&mut self, active_run: bool) {
+        let now = Instant::now();
+        let dt = now
+            .saturating_duration_since(self.motion.last_frame_at)
+            .as_secs_f32()
+            .clamp(0.004, 0.05);
+        self.motion.last_frame_at = now;
+
+        let target_pal = self.target_palette();
+        let target_ram = self.ram_history.back().copied().unwrap_or(0.35);
+        let target_sidebar = self.prefs.sidebar_width_px.clamp(210, 300) as f32;
+        let target_rail = if self.prefs.show_icon_rail { 74.0 } else { 0.0 };
+        let target_rad = self.prefs.corner_radius_px.min(18) as f32;
+
+        if !self.prefs.cyber_motion {
+            self.motion.palette = target_pal;
+            self.motion.ram_ratio = target_ram;
+            self.motion.sidebar_width = target_sidebar;
+            self.motion.rail_width = target_rail;
+            self.motion.radius_px = target_rad;
+            self.motion.channel_sweep = 0.0;
+            self.motion.pulse_burst = 0.0;
+            self.motion.spring_palette.step(dt, true);
+            self.motion.spring_artifacts.step(dt, true);
+            self.motion.spring_inspector.step(dt, true);
+            self.motion.bot_bounce.step(dt, true);
+            self.motion.settling = false;
+            return;
+        }
+
+        let sp_pal = self.motion.spring_palette.step(dt, false);
+        let sp_art = self.motion.spring_artifacts.step(dt, false);
+        let sp_insp = self.motion.spring_inspector.step(dt, false);
+        let sp_bot = self.motion.bot_bounce.step(dt, false);
+
+        let ease = |speed: f32| -> f32 { (1.0 - (-dt * speed).exp()).clamp(0.0, 1.0) };
+
+        let pal_t = ease(10.5);
+        self.motion.palette = self.motion.palette.lerp(&target_pal, pal_t);
+        self.motion.ram_ratio = theme::lerp_f32(self.motion.ram_ratio, target_ram, ease(6.0));
+        self.motion.sidebar_width =
+            theme::lerp_f32(self.motion.sidebar_width, target_sidebar, ease(14.0));
+        self.motion.rail_width = theme::lerp_f32(self.motion.rail_width, target_rail, ease(14.5));
+        self.motion.radius_px = theme::lerp_f32(self.motion.radius_px, target_rad, ease(13.0));
+        self.motion.channel_sweep *= (-dt * 4.0).exp();
+        self.motion.pulse_burst *= (-dt * 3.2).exp();
+
+        if self.motion.channel_sweep < 0.008 {
+            self.motion.channel_sweep = 0.0;
+        }
+        if self.motion.pulse_burst < 0.008 {
+            self.motion.pulse_burst = 0.0;
+        }
+
+        let phase_speed = if active_run { 2.6 } else { 1.15 };
+        self.motion.phase = (self.motion.phase + dt * phase_speed) % (TAU * 512.0);
+
+        let pal_diff = self.motion.palette.max_channel_diff(&target_pal);
+        if pal_diff < 0.003 {
+            self.motion.palette = target_pal;
+        }
+        if (self.motion.sidebar_width - target_sidebar).abs() < 0.35 {
+            self.motion.sidebar_width = target_sidebar;
+        }
+        if (self.motion.rail_width - target_rail).abs() < 0.35 {
+            self.motion.rail_width = target_rail;
+        }
+        if (self.motion.radius_px - target_rad).abs() < 0.12 {
+            self.motion.radius_px = target_rad;
+        }
+
+        self.motion.settling = pal_diff >= 0.003
+            || (self.motion.ram_ratio - target_ram).abs() > 0.0025
+            || (self.motion.sidebar_width - target_sidebar).abs() >= 0.35
+            || (self.motion.rail_width - target_rail).abs() >= 0.35
+            || (self.motion.radius_px - target_rad).abs() >= 0.12
+            || self.motion.channel_sweep > 0.008
+            || self.motion.pulse_burst > 0.008
+            || sp_pal
+            || sp_art
+            || sp_insp
+            || sp_bot;
+    }
+
+    pub fn ui_font(&self) -> Font {
+        if self.prefs.use_mono_chrome {
+            Font::MONOSPACE
+        } else {
+            Font::DEFAULT
+        }
     }
 
     pub fn apply_preset(&mut self, preset: DashboardPreset) {
@@ -501,19 +902,120 @@ impl DashboardState {
         self.ram_history.push_back(used_ratio);
     }
 
-    /// Throttle periodic sampling cleanly so idle UI stays responsive and lightweight.
+    /// Throttle periodic sampling using wall-clock time so 60 FPS animations don't spam probes.
     pub fn should_sample_on_tick(&mut self) -> bool {
-        self.tick_counter = self.tick_counter.saturating_add(1);
-        self.tick_counter.is_multiple_of(12)
+        if self.motion.last_telemetry_at.elapsed() >= Duration::from_millis(1400) {
+            self.motion.last_telemetry_at = Instant::now();
+            true
+        } else {
+            false
+        }
     }
 }
 
-/// Custom vector arc gauge drawn with `iced::widget::canvas`.
+/// Sleek 3px animated cyberpunk circuit scan & packet pulse bar placed beneath the header.
+pub struct CyberScanStripCanvas {
+    pub primary: Color,
+    pub secondary: Color,
+    pub rail: Color,
+    pub phase: f32,
+    pub sweep: f32,
+    pub active_run: bool,
+    pub motion_enabled: bool,
+}
+
+impl canvas::Program<Message> for CyberScanStripCanvas {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let w = bounds.width.max(40.0);
+        let h = bounds.height.max(2.0);
+        let mid_y = h * 0.5;
+
+        frame.stroke(
+            &canvas::Path::line(Point::new(0.0, mid_y), Point::new(w, mid_y)),
+            canvas::Stroke::default()
+                .with_color(Color {
+                    a: 0.42,
+                    ..self.rail
+                })
+                .with_width(1.0),
+        );
+
+        if !self.motion_enabled {
+            return vec![frame.into_geometry()];
+        }
+
+        // Gliding smooth cyber packet beam
+        let cycle = (self.phase * if self.active_run { 0.42 } else { 0.16 }).sin() * 0.5 + 0.5;
+        let eased = cycle * cycle * (3.0 - 2.0 * cycle);
+        let beam_w = if self.active_run { 160.0 } else { 110.0 };
+        let head_x = eased * (w - beam_w) + beam_w * 0.5;
+        let tail_start = (head_x - beam_w * 0.5).max(0.0);
+        let tail_end = (head_x + beam_w * 0.5).min(w);
+
+        frame.stroke(
+            &canvas::Path::line(Point::new(tail_start, mid_y), Point::new(tail_end, mid_y)),
+            canvas::Stroke::default()
+                .with_color(Color {
+                    a: if self.active_run { 0.48 } else { 0.28 },
+                    ..self.primary
+                })
+                .with_width(2.5)
+                .with_line_cap(canvas::LineCap::Round),
+        );
+
+        let core_w = 24.0;
+        frame.stroke(
+            &canvas::Path::line(
+                Point::new((head_x - core_w).max(0.0), mid_y),
+                Point::new((head_x + core_w).min(w), mid_y),
+            ),
+            canvas::Stroke::default()
+                .with_color(Color {
+                    a: 0.92,
+                    ..self.secondary
+                })
+                .with_width(2.5)
+                .with_line_cap(canvas::LineCap::Round),
+        );
+
+        if self.sweep > 0.01 {
+            let sweep_x = (1.0 - self.sweep) * w;
+            let sx0 = (sweep_x - 90.0).max(0.0);
+            let sx1 = (sweep_x + 90.0).min(w);
+            frame.stroke(
+                &canvas::Path::line(Point::new(sx0, mid_y), Point::new(sx1, mid_y)),
+                canvas::Stroke::default()
+                    .with_color(Color {
+                        a: self.sweep * 0.85,
+                        ..self.primary
+                    })
+                    .with_width(3.0),
+            );
+        }
+
+        vec![frame.into_geometry()]
+    }
+}
+
+/// Custom vector arc gauge drawn with `iced::widget::canvas` with smooth motion & cyber reticle.
 struct ReactorArcCanvas {
     ratio: f32,
     accent: Color,
     secondary: Color,
     track: Color,
+    phase: f32,
+    breath: f32,
+    motion_enabled: bool,
 }
 
 impl canvas::Program<Message> for ReactorArcCanvas {
@@ -565,6 +1067,19 @@ impl canvas::Program<Message> for ReactorArcCanvas {
                 end_angle: Radians(fill_end),
             });
         });
+
+        // Soft animated neon bloom under the active gauge arc
+        frame.stroke(
+            &active_path,
+            canvas::Stroke::default()
+                .with_color(Color {
+                    a: (0.16 * self.breath).clamp(0.08, 0.30),
+                    ..fill_color
+                })
+                .with_width(11.0)
+                .with_line_cap(canvas::LineCap::Round),
+        );
+
         frame.stroke(
             &active_path,
             canvas::Stroke::default()
@@ -577,25 +1092,45 @@ impl canvas::Program<Message> for ReactorArcCanvas {
             center.x + radius * fill_end.cos(),
             center.y + radius * fill_end.sin(),
         );
-        frame.fill(&canvas::Path::circle(dot_pos, 4.0), fill_color);
+        if self.motion_enabled {
+            frame.fill(
+                &canvas::Path::circle(dot_pos, 5.2 + 1.4 * (self.breath - 0.84)),
+                Color {
+                    a: 0.28,
+                    ..fill_color
+                },
+            );
+        }
+        frame.fill(&canvas::Path::circle(dot_pos, 3.8), fill_color);
 
-        let inner_ring = canvas::Path::new(|b| {
-            b.arc(canvas::path::Arc {
-                center,
-                radius: (radius - 10.0).max(8.0),
-                start_angle: Radians(start),
-                end_angle: Radians(start + sweep),
+        // Rotating segmented inner cyberpunk reticle
+        let inner_r = (radius - 10.0).max(8.0);
+        let rot = if self.motion_enabled {
+            self.phase * 0.45
+        } else {
+            0.0
+        };
+        for seg in 0..4 {
+            let s = rot + seg as f32 * (TAU * 0.25);
+            let e = s + 0.85;
+            let seg_path = canvas::Path::new(|b| {
+                b.arc(canvas::path::Arc {
+                    center,
+                    radius: inner_r,
+                    start_angle: Radians(s),
+                    end_angle: Radians(e),
+                });
             });
-        });
-        frame.stroke(
-            &inner_ring,
-            canvas::Stroke::default()
-                .with_color(Color {
-                    a: 0.35,
-                    ..self.track
-                })
-                .with_width(1.0),
-        );
+            frame.stroke(
+                &seg_path,
+                canvas::Stroke::default()
+                    .with_color(Color {
+                        a: if seg % 2 == 0 { 0.40 } else { 0.18 },
+                        ..fill_color
+                    })
+                    .with_width(1.2),
+            );
+        }
 
         vec![frame.into_geometry()]
     }
@@ -607,6 +1142,9 @@ struct TelemetryWaveformCanvas<'a> {
     accent: Color,
     grid_color: Color,
     show_grid: bool,
+    phase: f32,
+    breath: f32,
+    motion_enabled: bool,
 }
 
 impl canvas::Program<Message> for TelemetryWaveformCanvas<'_> {
@@ -629,6 +1167,11 @@ impl canvas::Program<Message> for TelemetryWaveformCanvas<'_> {
         let plot_h = (h - pad_y * 2.0).max(10.0);
 
         if self.show_grid {
+            let dash_offset = if self.motion_enabled {
+                (self.phase * 10.0) as usize
+            } else {
+                0
+            };
             for frac in [0.25_f32, 0.5, 0.75] {
                 let y = pad_y + plot_h * frac;
                 let line = canvas::Path::line(Point::new(pad_x, y), Point::new(w - pad_x, y));
@@ -642,7 +1185,7 @@ impl canvas::Program<Message> for TelemetryWaveformCanvas<'_> {
                         width: 1.0,
                         line_dash: canvas::LineDash {
                             segments: &[4.0, 5.0],
-                            offset: 0,
+                            offset: dash_offset,
                         },
                         ..canvas::Stroke::default()
                     },
@@ -670,14 +1213,27 @@ impl canvas::Program<Message> for TelemetryWaveformCanvas<'_> {
             }
         }
 
-        let area_path = canvas::Path::new(|b| {
-            b.move_to(Point::new(pts[0].x, pad_y + plot_h));
-            for p in &pts {
-                b.line_to(*p);
+        let trace_smooth_wave = |b: &mut canvas::path::Builder| {
+            b.move_to(pts[0]);
+            if pts.len() == 2 {
+                b.line_to(pts[1]);
+            } else {
+                for win in pts.windows(2) {
+                    let mid = Point::new((win[0].x + win[1].x) * 0.5, (win[0].y + win[1].y) * 0.5);
+                    b.quadratic_curve_to(win[0], mid);
+                }
+                if let Some(last) = pts.last() {
+                    b.line_to(*last);
+                }
             }
+        };
+
+        let area_path = canvas::Path::new(|b| {
+            trace_smooth_wave(b);
             if let Some(last) = pts.last() {
                 b.line_to(Point::new(last.x, pad_y + plot_h));
             }
+            b.line_to(Point::new(pts[0].x, pad_y + plot_h));
             b.close();
         });
         frame.fill(
@@ -688,26 +1244,37 @@ impl canvas::Program<Message> for TelemetryWaveformCanvas<'_> {
             },
         );
 
-        let line_path = canvas::Path::new(|b| {
-            b.move_to(pts[0]);
-            for p in pts.iter().skip(1) {
-                b.line_to(*p);
-            }
-        });
+        let line_path = canvas::Path::new(trace_smooth_wave);
+        frame.stroke(
+            &line_path,
+            canvas::Stroke::default()
+                .with_color(Color {
+                    a: 0.22,
+                    ..self.accent
+                })
+                .with_width(4.5)
+                .with_line_cap(canvas::LineCap::Round)
+                .with_line_join(canvas::LineJoin::Round),
+        );
         frame.stroke(
             &line_path,
             canvas::Stroke::default()
                 .with_color(self.accent)
-                .with_width(1.8)
+                .with_width(1.9)
                 .with_line_cap(canvas::LineCap::Round)
                 .with_line_join(canvas::LineJoin::Round),
         );
 
         if let Some(last) = pts.last() {
+            let halo_r = if self.motion_enabled {
+                5.5 + 3.2 * (0.5 + 0.5 * (self.phase * 2.8).sin())
+            } else {
+                5.5
+            };
             frame.fill(
-                &canvas::Path::circle(*last, 5.5),
+                &canvas::Path::circle(*last, halo_r),
                 Color {
-                    a: 0.25,
+                    a: (0.24 * self.breath).clamp(0.12, 0.36),
                     ..self.accent
                 },
             );
@@ -777,13 +1344,13 @@ fn view_hud_bar<'a>(app: &'a LoraDesktopApp, pal: CyberPalette) -> Element<'a, M
 
     let theme_pill = container(
         text(format!(
-            "{} · {} · {visible_count}/{}",
-            app.dashboard.prefs.theme_preset.code(),
-            app.dashboard.prefs.theme_preset.origin(),
+            "{} · {visible_count}/{}",
+            app.dashboard.active_theme_code(),
             DashboardWidgetKind::ALL.len()
         ))
         .size(10)
         .font(Font::MONOSPACE)
+        .wrapping(text::Wrapping::None)
         .color(pal.accent_secondary),
     )
     .padding(Padding::from([4, 10]))
@@ -798,11 +1365,12 @@ fn view_hud_bar<'a>(app: &'a LoraDesktopApp, pal: CyberPalette) -> Element<'a, M
 
     let customize_btn = button(
         text(if app.dashboard.customize_open {
-            "Done Customizing"
+            "Done"
         } else {
             "Customize HUD"
         })
-        .size(11),
+        .size(11)
+        .wrapping(text::Wrapping::None),
     )
     .padding(Padding::from([5, 12]))
     .style(theme::cyber_chip_button_with_radius(
@@ -823,8 +1391,9 @@ fn view_hud_bar<'a>(app: &'a LoraDesktopApp, pal: CyberPalette) -> Element<'a, M
     container(bar)
         .padding(Padding::from([8, 12]))
         .width(Length::Fill)
-        .style(theme::cyber_card(
+        .style(theme::palette_cyber_card(
             pal.bg_card,
+            pal.text_primary,
             pal.border_subtle,
             None,
             card_rad,
@@ -1164,6 +1733,7 @@ fn render_widget_slot<'a>(
     } else {
         Some(match slot.kind {
             DashboardWidgetKind::CommandDeck => widget_command_deck(app, pal),
+            DashboardWidgetKind::CapriCompanion => widget_capri_companion(app, pal),
             DashboardWidgetKind::SystemReactor => widget_system_reactor(app, pal),
             DashboardWidgetKind::TelemetrySparkline => widget_telemetry_sparkline(app, pal),
             DashboardWidgetKind::ModelArsenal => widget_model_arsenal(app, pal),
@@ -1189,8 +1759,20 @@ fn widget_frame<'a>(
     let c_rad = app.dashboard.control_radius();
     let customizing = app.dashboard.customize_open;
 
+    let semantic_accent = match kind {
+        DashboardWidgetKind::CommandDeck | DashboardWidgetKind::CapriCompanion => {
+            pal.accent_primary
+        }
+        DashboardWidgetKind::SystemReactor
+        | DashboardWidgetKind::TelemetrySparkline
+        | DashboardWidgetKind::ModelArsenal => pal.accent_secondary,
+        DashboardWidgetKind::WorkspaceShield | DashboardWidgetKind::AttestationRadar => pal.nominal,
+        DashboardWidgetKind::WorkflowMatrix | DashboardWidgetKind::OperatorScratchpad => {
+            pal.warning
+        }
+    };
     let indicator_dot = container(space::Space::new().width(6).height(6)).style(
-        theme::pill_container(pal.accent_primary, pal.accent_primary, pal.accent_primary),
+        theme::pill_container(semantic_accent, semantic_accent, semantic_accent),
     );
 
     let mut header = row![
@@ -1273,18 +1855,35 @@ fn widget_frame<'a>(
 
     let mut col = Column::new().spacing(10).push(header);
     if let Some(content) = body {
-        col = col.push(rule::horizontal(1).style(theme::divider_rule));
+        col = col.push(rule::horizontal(1).style(theme::palette_divider_rule(pal)));
         col = col.push(content);
     }
 
-    let (border_color, glow) = if app.dashboard.prefs.neon_borders {
+    let is_hero = kind == DashboardWidgetKind::CommandDeck;
+    let breath = app.dashboard.glow_breath();
+    let glow_alpha =
+        ((app.dashboard.prefs.glow_strength_pct as f32 / 100.0) * 0.23 * breath).clamp(0.02, 0.34);
+    let (border_color, glow) = if customizing {
         (
-            if customizing {
-                pal.border_accent
-            } else {
-                pal.border_subtle
+            pal.border_accent,
+            Some(Color {
+                a: glow_alpha,
+                ..pal.accent_secondary
+            }),
+        )
+    } else if app.dashboard.prefs.neon_borders
+        && is_hero
+        && app.dashboard.prefs.glow_strength_pct > 0
+    {
+        (
+            Color {
+                a: (0.62 * breath).clamp(0.45, 0.92),
+                ..pal.accent_primary
             },
-            Some(pal.accent_primary),
+            Some(Color {
+                a: glow_alpha,
+                ..pal.accent_primary
+            }),
         )
     } else {
         (pal.border_subtle, None)
@@ -1293,41 +1892,55 @@ fn widget_frame<'a>(
     container(col)
         .padding(pad)
         .width(Length::Fill)
-        .style(theme::cyber_card(pal.bg_card, border_color, glow, card_rad))
+        .style(theme::palette_cyber_card(
+            pal.bg_card,
+            pal.text_primary,
+            border_color,
+            glow,
+            card_rad,
+        ))
         .into()
 }
 
 fn widget_command_deck<'a>(app: &'a LoraDesktopApp, pal: CyberPalette) -> Element<'a, Message> {
     let c_rad = app.dashboard.control_radius();
-    let prompt_bar = row![
-        text_input(
-            "Ask Lora anything locally or jump straight into execution...",
-            &app.dashboard.quick_prompt_input,
-        )
-        .on_input(Message::QuickPromptChanged)
-        .on_submit(Message::SubmitQuickPrompt)
-        .padding(10)
-        .size(13)
-        .style(theme::cyber_input_style(
-            pal.bg_elevated,
-            pal.border_subtle,
-            pal.accent_primary,
-            pal.accent_primary_soft,
-            c_rad,
-        ))
-        .width(Length::Fill),
-        button(text("Execute in #chat").size(12))
-            .padding(Padding::from([10, 16]))
-            .style(theme::solid_button_with_radius(
+    let mut prompt_row = Row::new().spacing(8).align_y(Alignment::Center);
+    if app.dashboard.prefs.show_mini_bot {
+        prompt_row = prompt_row.push(crate::ux_studio::view_mini_bot_avatar(app, 48.0, None));
+    }
+    let prompt_bar = prompt_row
+        .push(
+            text_input(
+                "Ask Lora anything locally or jump straight into execution...",
+                &app.dashboard.quick_prompt_input,
+            )
+            .on_input(Message::QuickPromptChanged)
+            .on_submit(Message::SubmitQuickPrompt)
+            .padding(10)
+            .size(13)
+            .style(theme::palette_input_style(
+                pal.bg_elevated,
+                pal.border_subtle,
                 pal.accent_primary,
-                pal.accent_secondary,
-                pal.on_accent_text,
+                pal.accent_primary_soft,
+                pal.text_primary,
+                pal.text_muted,
+                pal.text_muted,
                 c_rad,
             ))
-            .on_press(Message::SubmitQuickPrompt),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
+            .width(Length::Fill),
+        )
+        .push(
+            button(text("Execute in #chat").size(12))
+                .padding(Padding::from([10, 16]))
+                .style(theme::solid_button_with_radius(
+                    pal.accent_primary,
+                    pal.accent_secondary,
+                    pal.on_accent_text,
+                    c_rad,
+                ))
+                .on_press(Message::SubmitQuickPrompt),
+        );
 
     let mut macros_row = Row::new().spacing(6).align_y(Alignment::Center);
     macros_row = macros_row.push(
@@ -1354,21 +1967,173 @@ fn widget_command_deck<'a>(app: &'a LoraDesktopApp, pal: CyberPalette) -> Elemen
     }
 
     let jumps = row![
-        text("JUMP")
+        text("OPEN")
             .size(10)
             .font(Font::MONOSPACE)
             .color(pal.text_muted),
-        jump_btn("#chat", ChannelTab::Chat, pal, c_rad),
-        jump_btn("#model-library", ChannelTab::ModelLibrary, pal, c_rad),
-        jump_btn("#agent-workspace", ChannelTab::AgentWorkspace, pal, c_rad),
-        jump_btn("#workflows", ChannelTab::WorkflowPipeline, pal, c_rad),
-        jump_btn("#hardware-hie", ChannelTab::Hardware, pal, c_rad),
-        jump_btn("#broker-gate", ChannelTab::BrokerGate, pal, c_rad),
+        jump_btn("Agent Chat", ChannelTab::Chat, pal, c_rad),
+        jump_btn("Code & Env", ChannelTab::CodeWorkspace, pal, c_rad),
+        jump_btn("Tasks & Daily", ChannelTab::WorkflowPipeline, pal, c_rad),
+        jump_btn("Projects", ChannelTab::AgentWorkspace, pal, c_rad),
+        jump_btn("llama.cpp", ChannelTab::Hardware, pal, c_rad),
+        jump_btn("Models", ChannelTab::ModelLibrary, pal, c_rad),
+        jump_btn("Studio", ChannelTab::Settings, pal, c_rad),
     ]
     .spacing(6)
     .align_y(Alignment::Center);
 
     column![prompt_bar, macros_row, jumps].spacing(8).into()
+}
+
+fn widget_capri_companion<'a>(app: &'a LoraDesktopApp, pal: CyberPalette) -> Element<'a, Message> {
+    let c_rad = app.dashboard.control_radius();
+    let capri = &app.dashboard.prefs.capri;
+    let phase = app.agent_phase();
+    let usage = crate::ux_studio::compute_context_budget_usage(
+        &app.messages,
+        &app.staged_attachments,
+        &app.composer_input,
+        app.requested_context,
+    );
+    let trust = app
+        .workspace_db
+        .folder_trust_for_path(app.active_project_id, &app.workspace_root_input);
+    let scale = (capri.widget_scale_px as f32).clamp(44.0, 76.0);
+
+    let mode_tag = format!(
+        "{} · {} · Effort:{} · Trust:{}",
+        app.access_mode.label(),
+        app.agent_kind.label(),
+        app.reasoning_effort.label(),
+        trust.label()
+    );
+
+    let info_col = column![
+        row![
+            text(format!("CAPRI × LORA · {}", phase.label()))
+                .size(11)
+                .font(Font::MONOSPACE)
+                .color(pal.accent_primary),
+            text(mode_tag)
+                .size(10)
+                .font(Font::MONOSPACE)
+                .color(pal.accent_secondary),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+        text(app.bot_quip.as_str())
+            .size(11)
+            .color(pal.text_secondary),
+        row![
+            text(format!(
+                "CTX: {} / {} tok ({:.0}%)",
+                usage.total_tokens, usage.max_tokens, usage.pct
+            ))
+            .size(10)
+            .font(Font::MONOSPACE)
+            .color(if usage.pct > 80.0 {
+                pal.warning
+            } else {
+                pal.nominal
+            }),
+            space::Space::new().width(8),
+            progress_bar(0.0..=100.0, usage.pct),
+        ]
+        .align_y(Alignment::Center),
+    ]
+    .spacing(5)
+    .width(Length::Fill);
+
+    let quick_controls = column![
+        row![
+            button(
+                text(format!("Aura: {}", capri.aura_preset.label()))
+                    .size(10)
+                    .font(Font::MONOSPACE)
+            )
+            .padding(Padding::from([4, 9]))
+            .style(theme::cyber_chip_button_with_radius(
+                true,
+                pal.accent_primary,
+                pal.bg_elevated,
+                pal.border_subtle,
+                pal.text_primary,
+                pal.text_secondary,
+                c_rad,
+            ))
+            .on_press(Message::CapriAuraPresetChanged(capri.aura_preset.next())),
+            button(
+                text(if capri.always_toothy_grin {
+                    "Grin: Teeth"
+                } else {
+                    "Mouth: Auto"
+                })
+                .size(10)
+                .font(Font::MONOSPACE)
+            )
+            .padding(Padding::from([4, 9]))
+            .style(theme::cyber_chip_button_with_radius(
+                capri.always_toothy_grin,
+                pal.accent_secondary,
+                pal.bg_elevated,
+                pal.border_subtle,
+                pal.text_primary,
+                pal.text_secondary,
+                c_rad,
+            ))
+            .on_press(Message::CapriToggleGrin(!capri.always_toothy_grin)),
+        ]
+        .spacing(6),
+        row![
+            button(
+                text(format!("Route: {}", app.access_mode.label()))
+                    .size(10)
+                    .font(Font::MONOSPACE)
+            )
+            .padding(Padding::from([4, 9]))
+            .style(theme::cyber_chip_button_with_radius(
+                app.access_mode == crate::workspace_db::ExecutionAccessMode::Api,
+                pal.warning,
+                pal.bg_elevated,
+                pal.border_subtle,
+                pal.text_primary,
+                pal.nominal,
+                c_rad,
+            ))
+            .on_press(Message::SelectAccessMode(match app.access_mode {
+                crate::workspace_db::ExecutionAccessMode::Local => {
+                    crate::workspace_db::ExecutionAccessMode::Api
+                }
+                crate::workspace_db::ExecutionAccessMode::Api => {
+                    crate::workspace_db::ExecutionAccessMode::Local
+                }
+            })),
+            button(text("Customize Capri ->").size(10).font(Font::MONOSPACE))
+                .padding(Padding::from([4, 9]))
+                .style(theme::cyber_chip_button_with_radius(
+                    false,
+                    pal.accent_secondary,
+                    pal.bg_elevated,
+                    pal.border_subtle,
+                    pal.text_primary,
+                    pal.accent_secondary,
+                    c_rad,
+                ))
+                .on_press(Message::SelectChannel(ChannelTab::Settings)),
+        ]
+        .spacing(6),
+    ]
+    .spacing(5)
+    .align_x(Horizontal::Right);
+
+    row![
+        crate::ux_studio::view_mini_bot_avatar(app, scale, None),
+        info_col,
+        quick_controls,
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 fn jump_btn<'a>(
@@ -1397,7 +2162,11 @@ fn widget_system_reactor<'a>(app: &'a LoraDesktopApp, pal: CyberPalette) -> Elem
     let total = vm.total_ram_mib.max(1) as f32;
     let avail = (vm.available_ram_mib as f32).min(total);
     let used_mib = vm.total_ram_mib.saturating_sub(vm.available_ram_mib);
-    let used_ratio = ((total - avail) / total).clamp(0.0, 1.0);
+    let used_ratio = if app.dashboard.prefs.cyber_motion {
+        app.dashboard.motion.ram_ratio.clamp(0.0, 1.0)
+    } else {
+        ((total - avail) / total).clamp(0.0, 1.0)
+    };
     let pct = (used_ratio * 100.0).round() as u32;
 
     let arc = canvas(ReactorArcCanvas {
@@ -1405,6 +2174,9 @@ fn widget_system_reactor<'a>(app: &'a LoraDesktopApp, pal: CyberPalette) -> Elem
         accent: pal.accent_secondary,
         secondary: pal.warning,
         track: pal.bg_elevated,
+        phase: app.dashboard.motion.phase,
+        breath: app.dashboard.glow_breath(),
+        motion_enabled: app.dashboard.prefs.cyber_motion,
     })
     .width(Length::Fixed(104.0))
     .height(Length::Fixed(104.0));
@@ -1493,6 +2265,9 @@ fn widget_telemetry_sparkline<'a>(
         accent: pal.accent_primary,
         grid_color: pal.border_subtle,
         show_grid: app.dashboard.prefs.show_sparkline_grid,
+        phase: app.dashboard.motion.phase,
+        breath: app.dashboard.glow_breath(),
+        motion_enabled: app.dashboard.prefs.cyber_motion,
     })
     .width(Length::Fill)
     .height(Length::Fixed(86.0));
@@ -1613,18 +2388,43 @@ fn widget_model_arsenal<'a>(app: &'a LoraDesktopApp, pal: CyberPalette) -> Eleme
     column![model_chips, ctx_row, profile_row].spacing(8).into()
 }
 
+fn compact_scope_tail(path: &str) -> String {
+    let parts: Vec<&str> = path.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
+    if parts.len() <= 2 {
+        path.to_string()
+    } else {
+        format!(".../{}/{}", parts[parts.len() - 2], parts[parts.len() - 1])
+    }
+}
+
 fn widget_workspace_shield<'a>(app: &'a LoraDesktopApp, pal: CyberPalette) -> Element<'a, Message> {
     let c_rad = app.dashboard.control_radius();
+    let scope_badge = row![
+        text("SCOPE")
+            .size(10)
+            .font(Font::MONOSPACE)
+            .color(pal.nominal),
+        text(compact_scope_tail(&app.workspace_root_input))
+            .size(11)
+            .font(Font::MONOSPACE)
+            .color(pal.text_secondary),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
     let root_input = text_input("Workspace root directory...", &app.workspace_root_input)
         .on_input(Message::WorkspacePathChanged)
         .padding(7)
         .size(11)
         .font(Font::MONOSPACE)
-        .style(theme::cyber_input_style(
+        .style(theme::palette_input_style(
             pal.bg_elevated,
             pal.border_subtle,
             pal.accent_secondary,
             pal.accent_secondary_soft,
+            pal.text_primary,
+            pal.text_muted,
+            pal.text_muted,
             c_rad,
         ))
         .width(Length::Fill);
@@ -1672,7 +2472,9 @@ fn widget_workspace_shield<'a>(app: &'a LoraDesktopApp, pal: CyberPalette) -> El
     ]
     .spacing(8);
 
-    column![root_input, toggles, actions].spacing(8).into()
+    column![scope_badge, root_input, toggles, actions]
+        .spacing(7)
+        .into()
 }
 
 fn widget_workflow_matrix<'a>(app: &'a LoraDesktopApp, pal: CyberPalette) -> Element<'a, Message> {
@@ -1790,11 +2592,14 @@ fn widget_operator_scratchpad<'a>(
             .on_input(Message::MacroLabelChanged)
             .padding(7)
             .size(11)
-            .style(theme::cyber_input_style(
+            .style(theme::palette_input_style(
                 pal.bg_elevated,
                 pal.border_subtle,
                 pal.accent_primary,
                 pal.accent_primary_soft,
+                pal.text_primary,
+                pal.text_muted,
+                pal.text_muted,
                 c_rad,
             ))
             .width(Length::Fixed(160.0)),
@@ -1806,11 +2611,14 @@ fn widget_operator_scratchpad<'a>(
         .on_submit(Message::AddPromptMacro)
         .padding(7)
         .size(11)
-        .style(theme::cyber_input_style(
+        .style(theme::palette_input_style(
             pal.bg_elevated,
             pal.border_subtle,
             pal.accent_secondary,
             pal.accent_secondary_soft,
+            pal.text_primary,
+            pal.text_muted,
+            pal.text_muted,
             c_rad,
         ))
         .width(Length::Fill),

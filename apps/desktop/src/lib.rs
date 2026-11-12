@@ -1,9 +1,12 @@
 //! Pure-Rust native multi-pane desktop client and headless diagnostics (`docs/DESKTOP_UX.md`, `ADR-0004`).
 
+pub mod agent_views;
 pub mod app;
 pub mod backend;
 pub mod dashboard;
 pub mod theme;
+pub mod ux_studio;
+pub mod workspace_db;
 
 use lora_core::{ApprovalRequest, TrustedConsentDialogViewModel};
 use std::path::Path;

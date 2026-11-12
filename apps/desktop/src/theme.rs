@@ -47,6 +47,128 @@ pub const RED_SOFT: Color = rgba(0xFF, 0x00, 0x3C, 0.16);
 
 pub const MODAL_BACKDROP: Color = rgba(0x04, 0x05, 0x09, 0.85);
 
+/// Surface darkness depth preset for infinite theme tuning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SurfaceDepth {
+    #[default]
+    Obsidian,
+    PitchOled,
+    CyberSlate,
+}
+
+impl SurfaceDepth {
+    pub const ALL: [Self; 3] = [Self::Obsidian, Self::PitchOled, Self::CyberSlate];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Obsidian => "Obsidian Dark",
+            Self::PitchOled => "Pitch OLED (#000)",
+            Self::CyberSlate => "Midnight Slate",
+        }
+    }
+}
+
+/// Infinite live theme generator controlled via RGB/Hue sliders in Custom Studio.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomThemeSpec {
+    pub enabled: bool,
+    pub primary_hue: u16,
+    pub secondary_hue: u16,
+    pub surface_depth: SurfaceDepth,
+}
+
+impl Default for CustomThemeSpec {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            primary_hue: 332,
+            secondary_hue: 186,
+            surface_depth: SurfaceDepth::Obsidian,
+        }
+    }
+}
+
+impl CustomThemeSpec {
+    pub fn build_palette(&self) -> CyberPalette {
+        let p = hsl_color((self.primary_hue % 360) as f32, 0.92, 0.56);
+        let s = hsl_color((self.secondary_hue % 360) as f32, 0.90, 0.54);
+        let (bg_rail, bg_sidebar, bg_stage, bg_card, bg_elevated, bg_dock, border_subtle) =
+            match self.surface_depth {
+                SurfaceDepth::Obsidian => (
+                    rgb(0x06, 0x07, 0x0D),
+                    rgb(0x0A, 0x0D, 0x17),
+                    rgb(0x0C, 0x10, 0x1C),
+                    rgb(0x11, 0x16, 0x26),
+                    rgb(0x18, 0x1F, 0x33),
+                    rgb(0x08, 0x0A, 0x12),
+                    rgb(0x21, 0x29, 0x42),
+                ),
+                SurfaceDepth::PitchOled => (
+                    rgb(0x01, 0x02, 0x04),
+                    rgb(0x04, 0x05, 0x09),
+                    rgb(0x05, 0x06, 0x0B),
+                    rgb(0x0A, 0x0C, 0x14),
+                    rgb(0x11, 0x15, 0x22),
+                    rgb(0x03, 0x04, 0x07),
+                    rgb(0x19, 0x1F, 0x30),
+                ),
+                SurfaceDepth::CyberSlate => (
+                    rgb(0x0B, 0x10, 0x1B),
+                    rgb(0x10, 0x16, 0x24),
+                    rgb(0x13, 0x1A, 0x2A),
+                    rgb(0x19, 0x22, 0x36),
+                    rgb(0x21, 0x2C, 0x44),
+                    rgb(0x0D, 0x12, 0x1F),
+                    rgb(0x2A, 0x37, 0x54),
+                ),
+            };
+        CyberPalette {
+            bg_rail,
+            bg_sidebar,
+            bg_stage,
+            bg_card,
+            bg_elevated,
+            bg_dock,
+            border_subtle,
+            border_accent: Color { a: 0.72, ..p },
+            accent_primary: p,
+            accent_primary_soft: Color { a: 0.16, ..p },
+            accent_secondary: s,
+            accent_secondary_soft: Color { a: 0.15, ..s },
+            nominal: rgb(0x1E, 0xE6, 0x9A),
+            nominal_soft: rgba(0x1E, 0xE6, 0x9A, 0.14),
+            warning: rgb(0xFF, 0xB8, 0x30),
+            critical: rgb(0xFF, 0x3B, 0x5C),
+            text_primary: rgb(0xF3, 0xF5, 0xFB),
+            text_secondary: rgb(0xC2, 0xCA, 0xDC),
+            text_muted: rgb(0x7E, 0x89, 0xA6),
+            on_accent_text: best_on_accent(p),
+        }
+        .ensure_wcag()
+    }
+}
+
+pub fn hsl_color(h_deg: f32, s: f32, l: f32) -> Color {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h = h_deg / 60.0;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r1, g1, b1) = match h as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c * 0.5;
+    Color::from_rgb(
+        (r1 + m).clamp(0.0, 1.0),
+        (g1 + m).clamp(0.0, 1.0),
+        (b1 + m).clamp(0.0, 1.0),
+    )
+}
+
 /// Corner geometry style for cards and FUI containers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum HudGeometry {
@@ -409,7 +531,7 @@ impl CyberThemePreset {
 }
 
 /// Active color tokens shared across the pure-Rust shell and modular HUD widgets.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CyberPalette {
     pub bg_rail: Color,
     pub bg_sidebar: Color,
@@ -433,7 +555,151 @@ pub struct CyberPalette {
     pub on_accent_text: Color,
 }
 
+#[inline]
+pub fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t.clamp(0.0, 1.0)
+}
+
+#[inline]
+pub fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    Color::from_rgba(
+        lerp_f32(a.r, b.r, t),
+        lerp_f32(a.g, b.g, t),
+        lerp_f32(a.b, b.b, t),
+        lerp_f32(a.a, b.a, t),
+    )
+}
+
+#[inline]
+fn color_diff(a: Color, b: Color) -> f32 {
+    (a.r - b.r)
+        .abs()
+        .max((a.g - b.g).abs())
+        .max((a.b - b.b).abs())
+        .max((a.a - b.a).abs())
+}
+
+#[inline]
+pub fn linearize_channel(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// WCAG 2.1 relative luminance in `[0.0, 1.0]`.
+#[inline]
+pub fn relative_luminance(c: Color) -> f32 {
+    0.2126 * linearize_channel(c.r)
+        + 0.7152 * linearize_channel(c.g)
+        + 0.0722 * linearize_channel(c.b)
+}
+
+/// WCAG 2.1 contrast ratio in `[1.0, 21.0]`.
+#[inline]
+pub fn contrast_ratio(a: Color, b: Color) -> f32 {
+    let la = relative_luminance(a);
+    let lb = relative_luminance(b);
+    let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// Choose crisp obsidian dark or pure white foreground for maximum legibility on an accent fill.
+#[inline]
+pub fn best_on_accent(accent: Color) -> Color {
+    let dark = rgb(0x06, 0x08, 0x0E);
+    let light = rgb(0xFF, 0xFF, 0xFF);
+    if contrast_ratio(dark, accent) >= contrast_ratio(light, accent) {
+        dark
+    } else {
+        light
+    }
+}
+
+/// Adaptively lift foreground lightness on dark surfaces until `min_ratio` is satisfied.
+pub fn enforce_contrast_on_dark(fg: Color, bg: Color, min_ratio: f32) -> Color {
+    let mut current = fg;
+    for step in 1..=12 {
+        if contrast_ratio(current, bg) >= min_ratio {
+            return current;
+        }
+        let t = step as f32 / 12.0;
+        current = lerp_color(fg, Color::WHITE, t);
+    }
+    Color::WHITE
+}
+
 impl CyberPalette {
+    /// Enforce WCAG AA/AAA text & interactive contrast against dark surfaces without losing neon identity.
+    pub fn ensure_wcag(mut self) -> Self {
+        let worst_bg = self.bg_elevated;
+        self.text_primary = enforce_contrast_on_dark(self.text_primary, worst_bg, 7.2);
+        self.text_secondary = enforce_contrast_on_dark(self.text_secondary, worst_bg, 4.8);
+        self.text_muted = enforce_contrast_on_dark(self.text_muted, self.bg_card, 3.6);
+        self.on_accent_text = best_on_accent(self.accent_primary);
+        self
+    }
+
+    pub fn wcag_primary_ratio(&self) -> f32 {
+        contrast_ratio(self.text_primary, self.bg_card)
+    }
+
+    pub fn wcag_grade_label(&self) -> &'static str {
+        let r = self.wcag_primary_ratio();
+        if r >= 7.0 {
+            "WCAG AAA"
+        } else if r >= 4.5 {
+            "WCAG AA"
+        } else {
+            "LOW"
+        }
+    }
+
+    /// Smoothly interpolate every color token toward `target` for liquid theme morphing.
+    pub fn lerp(&self, target: &CyberPalette, t: f32) -> CyberPalette {
+        CyberPalette {
+            bg_rail: lerp_color(self.bg_rail, target.bg_rail, t),
+            bg_sidebar: lerp_color(self.bg_sidebar, target.bg_sidebar, t),
+            bg_stage: lerp_color(self.bg_stage, target.bg_stage, t),
+            bg_card: lerp_color(self.bg_card, target.bg_card, t),
+            bg_elevated: lerp_color(self.bg_elevated, target.bg_elevated, t),
+            bg_dock: lerp_color(self.bg_dock, target.bg_dock, t),
+            border_subtle: lerp_color(self.border_subtle, target.border_subtle, t),
+            border_accent: lerp_color(self.border_accent, target.border_accent, t),
+            accent_primary: lerp_color(self.accent_primary, target.accent_primary, t),
+            accent_primary_soft: lerp_color(
+                self.accent_primary_soft,
+                target.accent_primary_soft,
+                t,
+            ),
+            accent_secondary: lerp_color(self.accent_secondary, target.accent_secondary, t),
+            accent_secondary_soft: lerp_color(
+                self.accent_secondary_soft,
+                target.accent_secondary_soft,
+                t,
+            ),
+            nominal: lerp_color(self.nominal, target.nominal, t),
+            nominal_soft: lerp_color(self.nominal_soft, target.nominal_soft, t),
+            warning: lerp_color(self.warning, target.warning, t),
+            critical: lerp_color(self.critical, target.critical, t),
+            text_primary: lerp_color(self.text_primary, target.text_primary, t),
+            text_secondary: lerp_color(self.text_secondary, target.text_secondary, t),
+            text_muted: lerp_color(self.text_muted, target.text_muted, t),
+            on_accent_text: lerp_color(self.on_accent_text, target.on_accent_text, t),
+        }
+    }
+
+    /// Maximum per-channel difference against another palette to detect animation completion.
+    pub fn max_channel_diff(&self, other: &CyberPalette) -> f32 {
+        color_diff(self.bg_stage, other.bg_stage)
+            .max(color_diff(self.bg_card, other.bg_card))
+            .max(color_diff(self.accent_primary, other.accent_primary))
+            .max(color_diff(self.accent_secondary, other.accent_secondary))
+            .max(color_diff(self.text_primary, other.text_primary))
+    }
+
     pub fn iced_theme(&self) -> Theme {
         Theme::custom(
             "Lora Cyberpunk HUD",
@@ -454,26 +720,38 @@ pub fn lora_cyberpunk_theme() -> Theme {
     CyberThemePreset::NightCity2077.palette().iced_theme()
 }
 
-/// Style for Markdown blocks rendered directly inside the native `#chat` message stream.
+/// Style for Markdown blocks rendered directly inside `#chat`.
 pub fn chat_markdown_style() -> markdown::Style {
+    palette_markdown_style(CyberThemePreset::NightCity2077.palette())
+}
+
+/// Palette-driven Markdown styling reacting live to the active cyberpunk theme.
+pub fn palette_markdown_style(pal: CyberPalette) -> markdown::Style {
     markdown::Style {
         font: iced::Font::DEFAULT,
         inline_code_highlight: markdown::Highlight {
-            background: BG_RAIL.into(),
+            background: pal.bg_rail.into(),
             border: border::rounded(4),
         },
         inline_code_padding: iced::Padding::from([1, 4]),
-        inline_code_color: LORA_MAGENTA,
+        inline_code_color: pal.accent_secondary,
         inline_code_font: iced::Font::MONOSPACE,
         code_block_font: iced::Font::MONOSPACE,
-        link_color: LORA_MAGENTA,
+        link_color: pal.accent_primary,
     }
 }
 
 pub fn surface_container(bg: Color) -> impl Fn(&Theme) -> container::Style {
+    palette_surface_container(bg, TEXT_PRIMARY)
+}
+
+pub fn palette_surface_container(
+    bg: Color,
+    text_color: Color,
+) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(bg)),
-        text_color: Some(TEXT_PRIMARY),
+        text_color: Some(text_color),
         ..container::Style::default()
     }
 }
@@ -483,9 +761,18 @@ pub fn card_container(
     border_color: Color,
     radius: f32,
 ) -> impl Fn(&Theme) -> container::Style {
+    palette_card_container(bg, TEXT_PRIMARY, border_color, radius)
+}
+
+pub fn palette_card_container(
+    bg: Color,
+    text_color: Color,
+    border_color: Color,
+    radius: f32,
+) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(bg)),
-        text_color: Some(TEXT_PRIMARY),
+        text_color: Some(text_color),
         border: Border {
             color: border_color,
             width: 1.0,
@@ -495,16 +782,26 @@ pub fn card_container(
     }
 }
 
-/// Minimalist cyberpunk card with optional subtle neon ambient edge glow.
+/// Minimalist cyberpunk card with optional crisp ambient edge highlight.
 pub fn cyber_card(
     bg: Color,
     border_color: Color,
     glow_color: Option<Color>,
     radius: f32,
 ) -> impl Fn(&Theme) -> container::Style {
+    palette_cyber_card(bg, TEXT_PRIMARY, border_color, glow_color, radius)
+}
+
+pub fn palette_cyber_card(
+    bg: Color,
+    text_color: Color,
+    border_color: Color,
+    glow_color: Option<Color>,
+    radius: f32,
+) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(bg)),
-        text_color: Some(TEXT_PRIMARY),
+        text_color: Some(text_color),
         border: Border {
             color: border_color,
             width: 1.0,
@@ -512,9 +809,12 @@ pub fn cyber_card(
         },
         shadow: match glow_color {
             Some(c) => Shadow {
-                color: Color { a: 0.18, ..c },
+                color: Color {
+                    a: if c.a < 0.99 { c.a } else { 0.14 },
+                    ..c
+                },
                 offset: Vector::new(0.0, 2.0),
-                blur_radius: 14.0,
+                blur_radius: 10.0,
             },
             None => Shadow::default(),
         },
@@ -547,16 +847,20 @@ pub fn modal_backdrop_style(_theme: &Theme) -> container::Style {
 }
 
 pub fn modal_card_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(BG_CARD)),
-        text_color: Some(TEXT_PRIMARY),
+    palette_modal_card(CyberThemePreset::NightCity2077.palette(), 8.0)(_theme)
+}
+
+pub fn palette_modal_card(pal: CyberPalette, radius: f32) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(Background::Color(pal.bg_card)),
+        text_color: Some(pal.text_primary),
         border: Border {
-            color: AMBER,
+            color: pal.warning,
             width: 1.5,
-            radius: 8.0.into(),
+            radius: radius.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.72),
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.78),
             offset: Vector::new(0.0, 14.0),
             blur_radius: 36.0,
         },
@@ -567,6 +871,15 @@ pub fn modal_card_style(_theme: &Theme) -> container::Style {
 pub fn divider_rule(_theme: &Theme) -> rule::Style {
     rule::Style {
         color: BORDER_SUBTLE,
+        radius: 0.0.into(),
+        fill_mode: rule::FillMode::Full,
+        snap: true,
+    }
+}
+
+pub fn palette_divider_rule(pal: CyberPalette) -> impl Fn(&Theme) -> rule::Style {
+    move |_| rule::Style {
+        color: pal.border_subtle,
         radius: 0.0.into(),
         fill_mode: rule::FillMode::Full,
         snap: true,
@@ -610,7 +923,14 @@ pub fn palette_rail_button(
             background: Some(Background::Color(bg)),
             text_color: fg,
             border: Border {
-                color: if active { TEXT_PRIMARY } else { BORDER_SUBTLE },
+                color: if active {
+                    text_color
+                } else {
+                    Color {
+                        a: 0.16,
+                        ..text_color
+                    }
+                },
                 width: 1.0,
                 radius: radius.into(),
             },
@@ -773,6 +1093,29 @@ pub fn cyber_input_style(
     selection_bg: Color,
     radius: f32,
 ) -> impl Fn(&Theme, text_input::Status) -> text_input::Style {
+    palette_input_style(
+        bg,
+        border_idle,
+        focus_accent,
+        selection_bg,
+        TEXT_PRIMARY,
+        TEXT_CHANNEL,
+        TEXT_MUTED,
+        radius,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn palette_input_style(
+    bg: Color,
+    border_idle: Color,
+    focus_accent: Color,
+    selection_bg: Color,
+    text_color: Color,
+    placeholder_color: Color,
+    icon_color: Color,
+    radius: f32,
+) -> impl Fn(&Theme, text_input::Status) -> text_input::Style {
     move |_, status| {
         let border_color = match status {
             text_input::Status::Focused { .. } => focus_accent,
@@ -789,10 +1132,57 @@ pub fn cyber_input_style(
                 width: 1.0,
                 radius: radius.into(),
             },
-            icon: TEXT_MUTED,
-            placeholder: TEXT_CHANNEL,
-            value: TEXT_PRIMARY,
+            icon: icon_color,
+            placeholder: placeholder_color,
+            value: text_color,
             selection: selection_bg,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wcag_adaptive_contrast_enforced_across_presets_and_custom_hues() {
+        for preset in CyberThemePreset::ALL {
+            let pal = preset.palette().ensure_wcag();
+            assert!(
+                pal.wcag_primary_ratio() >= 7.0,
+                "preset {:?} primary contrast too low: {:.2}",
+                preset,
+                pal.wcag_primary_ratio()
+            );
+            assert_eq!(pal.wcag_grade_label(), "WCAG AAA");
+            assert!(
+                contrast_ratio(pal.on_accent_text, pal.accent_primary) >= 4.5,
+                "preset {:?} on_accent contrast too low",
+                preset
+            );
+        }
+
+        for depth in SurfaceDepth::ALL {
+            for hue in (0_u16..360).step_by(37) {
+                let spec = CustomThemeSpec {
+                    enabled: true,
+                    primary_hue: hue,
+                    secondary_hue: (hue + 145) % 360,
+                    surface_depth: depth,
+                };
+                let pal = spec.build_palette();
+                assert!(
+                    contrast_ratio(pal.text_primary, pal.bg_elevated) >= 7.0,
+                    "custom hue {hue} depth {:?} failed AAA",
+                    depth
+                );
+                assert!(
+                    contrast_ratio(pal.text_secondary, pal.bg_elevated) >= 4.5,
+                    "custom hue {hue} depth {:?} failed AA secondary",
+                    depth
+                );
+                assert!(contrast_ratio(pal.on_accent_text, pal.accent_primary) >= 4.5);
+            }
         }
     }
 }
