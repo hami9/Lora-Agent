@@ -6,16 +6,18 @@ use crate::backend::{
     GuiApprovalPromptPort,
 };
 use crate::build_consent_preview;
+use crate::dashboard::{
+    self, DashboardPreferences, DashboardPreset, DashboardState, DashboardWidgetKind, HudDensity,
+};
 use crate::theme::{
-    self, AMBER, AMBER_SOFT, BG_CARD, BG_COMPOSER, BG_DOCK, BG_RAIL, BG_SELECTED, BG_SIDEBAR,
-    BG_STAGE, BLURPLE, BLURPLE_HOVER, BORDER_ACCENT, BORDER_SUBTLE, GREEN, GREEN_SOFT,
-    LORA_MAGENTA, LORA_MAGENTA_SOFT, RED, RED_HOVER, RED_SOFT, TEXT_MUTED, TEXT_PRIMARY,
-    TEXT_SECONDARY,
+    self, CyberThemePreset, HudGeometry, AMBER, AMBER_SOFT, BG_CARD, BG_COMPOSER, BG_RAIL,
+    BG_SELECTED, BG_SIDEBAR, BG_STAGE, BLURPLE, BLURPLE_HOVER, BORDER_SUBTLE, GREEN, LORA_MAGENTA,
+    RED, RED_HOVER, RED_SOFT, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
-    button, checkbox, column, container, markdown, progress_bar, row, rule, scrollable, space,
-    stack, text, text_input, Column, Row,
+    button, checkbox, column, container, image, markdown, progress_bar, row, rule, scrollable,
+    space, stack, text, text_input, Column, Row,
 };
 use iced::{Alignment, Element, Font, Length, Padding, Subscription, Task, Theme};
 use lora_core::{
@@ -289,6 +291,27 @@ pub enum Message {
         request_id: u64,
         decision: ApprovalDecision,
     },
+    // Modular Dashboard & Cyberpunk HUD customization
+    SelectDashboardPreset(DashboardPreset),
+    SelectCyberTheme(CyberThemePreset),
+    SelectHudDensity(HudDensity),
+    SelectHudGeometry(HudGeometry),
+    ToggleCustomizeHud,
+    ToggleNeonBorders(bool),
+    ToggleSparklineGrid(bool),
+    ToggleWidgetVisible(DashboardWidgetKind),
+    ToggleWidgetCollapsed(DashboardWidgetKind),
+    ToggleWidgetSpan(DashboardWidgetKind),
+    MoveWidgetUp(DashboardWidgetKind),
+    MoveWidgetDown(DashboardWidgetKind),
+    ResetDashboardLayout,
+    QuickPromptChanged(String),
+    SubmitQuickPrompt,
+    RunPromptMacro(String),
+    MacroLabelChanged(String),
+    MacroPromptChanged(String),
+    AddPromptMacro,
+    RemovePromptMacro(usize),
 }
 
 /// Top-level `iced` application state for `lora-desktop`.
@@ -331,6 +354,8 @@ pub struct LoraDesktopApp {
     pub latest_snapshot: Option<(DesktopSnapshot, bool)>,
     pub transcript_offset: usize,
     pub pending_consent: Option<PendingConsentPrompt>,
+    pub dashboard: DashboardState,
+    logo_handle: image::Handle,
 }
 
 impl LoraDesktopApp {
@@ -344,6 +369,9 @@ impl LoraDesktopApp {
     ) -> Self {
         let telemetry = collect_core_telemetry(&service, experimental_enabled)
             .unwrap_or_else(|e| panic!("failed to collect initial desktop telemetry: {e}"));
+        let mut dashboard = DashboardState::new(&telemetry);
+        dashboard.prefs = DashboardPreferences::load_from_dir(service.data_dir());
+        dashboard.prefs.sanitize();
         let selected_model = telemetry.models.first().map(|m| m.display_alias.clone());
         let intro = ChatMessageEntry::assistant(
             "welcome-0",
@@ -387,6 +415,8 @@ impl LoraDesktopApp {
             latest_snapshot: None,
             transcript_offset: 0,
             pending_consent: None,
+            dashboard,
+            logo_handle: crate::load_logo_handle(),
         }
     }
 
@@ -399,7 +429,7 @@ impl LoraDesktopApp {
     }
 
     pub fn theme(&self) -> Theme {
-        theme::lora_discord_theme()
+        self.dashboard.palette().iced_theme()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -421,8 +451,75 @@ impl LoraDesktopApp {
             {
                 self.selected_model = fresh.models.first().map(|m| m.display_alias.clone());
             }
+            self.dashboard.record_telemetry_sample(&fresh);
             self.telemetry = fresh;
         }
+    }
+
+    fn persist_dashboard_prefs(&self) {
+        self.dashboard.prefs.save_to_dir(self.service.data_dir());
+    }
+
+    fn dispatch_chat_prompt(&mut self, prompt: String) {
+        let prompt = prompt.trim().to_string();
+        if prompt.is_empty() {
+            return;
+        }
+        if self.active_run_id.is_some() {
+            self.composer_input = prompt;
+            self.status_banner =
+                "A task is already running — press STOP before dispatching another turn."
+                    .to_string();
+            return;
+        }
+        let Some(model) = self.selected_model.clone() else {
+            self.composer_input = prompt;
+            self.status_banner =
+                "No verified GGUF model imported yet. Prompt staged — import a model in #model-library."
+                    .to_string();
+            self.active_channel = ChannelTab::ModelLibrary;
+            self.active_guild = WorkspaceGuild::LocalCore;
+            return;
+        };
+
+        let seq = self.next_run_seq;
+        self.next_run_seq += 1;
+        let run_id = format!("desk-run-{}-{seq}", now_epoch_ms());
+        self.composer_input.clear();
+        self.active_channel = ChannelTab::Chat;
+        self.active_guild = WorkspaceGuild::LocalCore;
+        self.messages
+            .push(ChatMessageEntry::user(format!("usr-{seq}"), &prompt));
+        self.messages
+            .push(ChatMessageEntry::assistant(&run_id, &model, "", true));
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.active_cancel_flag = Some(Arc::clone(&cancel_flag));
+        self.active_run_id = Some(run_id.clone());
+        self.status_banner = format!("Running {run_id} on '{model}' (local worker)...");
+
+        let mode = if self.read_only_assistant {
+            ExecutionMode::ReadOnlyAssistant
+        } else {
+            ExecutionMode::ChatOnly
+        };
+        let ws_path = self
+            .read_only_assistant
+            .then(|| std::path::PathBuf::from(self.workspace_root_input.trim()));
+
+        spawn_chat_run(
+            Arc::clone(&self.service),
+            self.event_tx.clone(),
+            run_id,
+            model,
+            self.requested_context,
+            self.tuning_profile,
+            mode,
+            ws_path,
+            prompt,
+            self.use_rag,
+            cancel_flag,
+        );
     }
 
     fn drain_worker_events(&mut self) {
@@ -552,7 +649,12 @@ impl LoraDesktopApp {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Tick => self.drain_worker_events(),
+            Message::Tick => {
+                self.drain_worker_events();
+                if self.dashboard.should_sample_on_tick() {
+                    self.refresh_telemetry();
+                }
+            }
             Message::SelectGuild(guild) => {
                 self.active_guild = guild;
                 let next = guild.default_channel();
@@ -603,61 +705,8 @@ impl LoraDesktopApp {
                 self.composer_input = val;
             }
             Message::SendChatMessage => {
-                let prompt = self.composer_input.trim().to_string();
-                if prompt.is_empty() {
-                    return Task::none();
-                }
-                if self.active_run_id.is_some() {
-                    self.status_banner =
-                        "A task is already running — press STOP before dispatching another turn."
-                            .to_string();
-                    return Task::none();
-                }
-                let Some(model) = self.selected_model.clone() else {
-                    self.status_banner =
-                        "No verified GGUF model imported yet. Import one in #model-library."
-                            .to_string();
-                    self.active_channel = ChannelTab::ModelLibrary;
-                    self.active_guild = WorkspaceGuild::LocalCore;
-                    return Task::none();
-                };
-
-                let seq = self.next_run_seq;
-                self.next_run_seq += 1;
-                let run_id = format!("desk-run-{}-{seq}", now_epoch_ms());
-                self.composer_input.clear();
-                self.messages
-                    .push(ChatMessageEntry::user(format!("usr-{seq}"), &prompt));
-                self.messages
-                    .push(ChatMessageEntry::assistant(&run_id, &model, "", true));
-
-                let cancel_flag = Arc::new(AtomicBool::new(false));
-                self.active_cancel_flag = Some(Arc::clone(&cancel_flag));
-                self.active_run_id = Some(run_id.clone());
-                self.status_banner = format!("Running {run_id} on '{model}' (local worker)...");
-
-                let mode = if self.read_only_assistant {
-                    ExecutionMode::ReadOnlyAssistant
-                } else {
-                    ExecutionMode::ChatOnly
-                };
-                let ws_path = self
-                    .read_only_assistant
-                    .then(|| std::path::PathBuf::from(self.workspace_root_input.trim()));
-
-                spawn_chat_run(
-                    Arc::clone(&self.service),
-                    self.event_tx.clone(),
-                    run_id,
-                    model,
-                    self.requested_context,
-                    self.tuning_profile,
-                    mode,
-                    ws_path,
-                    prompt,
-                    self.use_rag,
-                    cancel_flag,
-                );
+                let prompt = self.composer_input.clone();
+                self.dispatch_chat_prompt(prompt);
             }
             Message::SelectModel(alias) => {
                 self.selected_model = Some(alias.clone());
@@ -790,11 +839,103 @@ impl LoraDesktopApp {
                 }
                 self.status_banner = format!("Consent decision submitted: {decision:?}");
             }
+            Message::SelectDashboardPreset(preset) => {
+                self.dashboard.apply_preset(preset);
+                self.persist_dashboard_prefs();
+                self.status_banner = format!("Dashboard preset active: {}", preset.label());
+            }
+            Message::SelectCyberTheme(preset) => {
+                self.dashboard.prefs.theme_preset = preset;
+                self.persist_dashboard_prefs();
+                self.status_banner =
+                    format!("Cyber theme: {} · {}", preset.label(), preset.origin());
+            }
+            Message::SelectHudDensity(density) => {
+                self.dashboard.prefs.density = density;
+                self.persist_dashboard_prefs();
+                self.status_banner = format!("HUD density: {}", density.label());
+            }
+            Message::SelectHudGeometry(geometry) => {
+                self.dashboard.prefs.geometry = geometry;
+                self.persist_dashboard_prefs();
+                self.status_banner = format!("HUD frame geometry: {}", geometry.label());
+            }
+            Message::ToggleCustomizeHud => {
+                self.dashboard.customize_open = !self.dashboard.customize_open;
+            }
+            Message::ToggleNeonBorders(enabled) => {
+                self.dashboard.prefs.neon_borders = enabled;
+                self.persist_dashboard_prefs();
+            }
+            Message::ToggleSparklineGrid(enabled) => {
+                self.dashboard.prefs.show_sparkline_grid = enabled;
+                self.persist_dashboard_prefs();
+            }
+            Message::ToggleWidgetVisible(kind) => {
+                self.dashboard.toggle_widget_visible(kind);
+                self.persist_dashboard_prefs();
+            }
+            Message::ToggleWidgetCollapsed(kind) => {
+                self.dashboard.toggle_widget_collapsed(kind);
+                self.persist_dashboard_prefs();
+            }
+            Message::ToggleWidgetSpan(kind) => {
+                self.dashboard.toggle_widget_span(kind);
+                self.persist_dashboard_prefs();
+            }
+            Message::MoveWidgetUp(kind) => {
+                self.dashboard.move_widget(kind, -1);
+                self.persist_dashboard_prefs();
+            }
+            Message::MoveWidgetDown(kind) => {
+                self.dashboard.move_widget(kind, 1);
+                self.persist_dashboard_prefs();
+            }
+            Message::ResetDashboardLayout => {
+                self.dashboard.reset_layout();
+                self.persist_dashboard_prefs();
+                self.status_banner = "Dashboard HUD & widgets reset to defaults.".to_string();
+            }
+            Message::QuickPromptChanged(val) => {
+                self.dashboard.quick_prompt_input = val;
+            }
+            Message::SubmitQuickPrompt => {
+                let prompt = self.dashboard.quick_prompt_input.trim().to_string();
+                if !prompt.is_empty() {
+                    self.dashboard.quick_prompt_input.clear();
+                    self.dispatch_chat_prompt(prompt);
+                }
+            }
+            Message::RunPromptMacro(prompt) => {
+                self.dispatch_chat_prompt(prompt);
+            }
+            Message::MacroLabelChanged(val) => {
+                self.dashboard.macro_label_input = val;
+            }
+            Message::MacroPromptChanged(val) => {
+                self.dashboard.macro_prompt_input = val;
+            }
+            Message::AddPromptMacro => {
+                if self.dashboard.add_custom_macro() {
+                    self.persist_dashboard_prefs();
+                    self.status_banner = "Saved custom command macro to dashboard.".to_string();
+                } else {
+                    self.status_banner =
+                        "Enter both macro label and prompt text (up to 10 macros).".to_string();
+                }
+            }
+            Message::RemovePromptMacro(idx) => {
+                if self.dashboard.remove_custom_macro(idx) {
+                    self.persist_dashboard_prefs();
+                    self.status_banner = "Removed dashboard command macro.".to_string();
+                }
+            }
         }
         Task::none()
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        let pal = self.dashboard.palette();
         let mut columns = Row::new()
             .push(self.view_guild_rail())
             .push(self.view_channel_sidebar())
@@ -808,7 +949,7 @@ impl LoraDesktopApp {
             container(columns.height(Length::Fill).width(Length::Fill))
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .style(theme::surface_container(BG_STAGE))
+                .style(theme::surface_container(pal.bg_stage))
                 .into();
 
         if let Some(prompt) = &self.pending_consent {
@@ -819,10 +960,34 @@ impl LoraDesktopApp {
     }
 
     fn view_guild_rail(&self) -> Element<'_, Message> {
+        let pal = self.dashboard.palette();
         let mut rail = Column::new()
             .spacing(10)
             .padding(Padding::from([12, 10]))
             .align_x(Alignment::Center);
+
+        let brand_btn = button(
+            container(
+                image(&self.logo_handle)
+                    .width(Length::Fixed(46.0))
+                    .height(Length::Fixed(46.0)),
+            )
+            .width(Length::Fixed(48.0))
+            .height(Length::Fixed(48.0))
+            .align_x(Horizontal::Center)
+            .align_y(Vertical::Center),
+        )
+        .padding(0)
+        .style(theme::palette_rail_button(
+            self.active_channel == ChannelTab::Dashboard,
+            pal.accent_primary,
+            pal.accent_secondary,
+            pal.bg_elevated,
+            pal.text_primary,
+        ))
+        .on_press(Message::SelectChannel(ChannelTab::Dashboard));
+        rail = rail.push(brand_btn);
+        rail = rail.push(rule::horizontal(1).style(theme::divider_rule));
 
         for guild in WorkspaceGuild::ALL {
             let active = self.active_guild == guild;
@@ -833,9 +998,17 @@ impl LoraDesktopApp {
                         .height(if active { 28 } else { 8 }),
                 )
                 .style(theme::pill_container(
-                    if active { LORA_MAGENTA } else { TEXT_MUTED },
-                    TEXT_PRIMARY,
-                    if active { LORA_MAGENTA } else { BG_RAIL },
+                    if active {
+                        pal.accent_secondary
+                    } else {
+                        pal.text_muted
+                    },
+                    pal.text_primary,
+                    if active {
+                        pal.accent_secondary
+                    } else {
+                        pal.bg_rail
+                    },
                 ));
             let btn = button(
                 container(text(guild.badge_text()).size(14).font(Font::MONOSPACE))
@@ -845,7 +1018,13 @@ impl LoraDesktopApp {
                     .align_y(Vertical::Center),
             )
             .padding(0)
-            .style(theme::rail_button(active))
+            .style(theme::palette_rail_button(
+                active,
+                pal.accent_primary,
+                pal.accent_secondary,
+                pal.bg_elevated,
+                pal.text_primary,
+            ))
             .on_press(Message::SelectGuild(guild));
 
             rail = rail.push(row![indicator, btn].spacing(6).align_y(Alignment::Center));
@@ -862,7 +1041,12 @@ impl LoraDesktopApp {
                 .align_y(Vertical::Center),
         )
         .padding(0)
-        .style(theme::solid_button(RED, RED_HOVER, TEXT_PRIMARY))
+        .style(theme::solid_button_with_radius(
+            pal.critical,
+            RED_HOVER,
+            TEXT_PRIMARY,
+            self.dashboard.control_radius(),
+        ))
         .on_press(Message::StopActiveTask);
 
         rail = rail.push(stop_btn);
@@ -870,38 +1054,50 @@ impl LoraDesktopApp {
         container(rail)
             .width(Length::Fixed(74.0))
             .height(Length::Fill)
-            .style(theme::surface_container(BG_RAIL))
+            .style(theme::surface_container(pal.bg_rail))
             .into()
     }
 
     fn view_channel_sidebar(&self) -> Element<'_, Message> {
+        let pal = self.dashboard.palette();
         let header = container(
-            column![
-                text("Lora Agent").size(16),
-                text(format!("{} · Pure Rust Native", self.active_guild.title()))
+            row![
+                image(&self.logo_handle)
+                    .width(Length::Fixed(24.0))
+                    .height(Length::Fixed(24.0)),
+                column![
+                    text("Lora Agent").size(16).color(pal.text_primary),
+                    text(format!(
+                        "{} · {}",
+                        self.active_guild.title(),
+                        self.dashboard.prefs.theme_preset.code()
+                    ))
                     .size(11)
-                    .color(TEXT_MUTED),
+                    .color(pal.text_muted),
+                ]
+                .spacing(2),
             ]
-            .spacing(2),
+            .spacing(8)
+            .align_y(Alignment::Center),
         )
         .padding(Padding::from([12, 14]))
         .width(Length::Fill);
 
         let mut list = Column::new().spacing(4).padding(Padding::from([8, 8]));
-        list = list.push(text("CORE CHANNELS").size(11).color(TEXT_MUTED));
+        list = list.push(text("CORE CHANNELS").size(11).color(pal.text_muted));
         for ch in ChannelTab::CORE_CHANNELS {
             list = list.push(self.channel_row_btn(ch));
         }
 
         list = list.push(space::Space::new().height(10));
-        list = list.push(text("TRUST & GOVERNANCE").size(11).color(TEXT_MUTED));
+        list = list.push(text("TRUST & GOVERNANCE").size(11).color(pal.text_muted));
         for ch in ChannelTab::SECURITY_CHANNELS {
             list = list.push(self.channel_row_btn(ch));
         }
 
         if self.experimental_enabled {
             list = list.push(space::Space::new().height(10));
-            list = list.push(text("EXPERIMENTAL LAB").size(11).color(AMBER));
+            list = list.push(text("EXPERIMENTAL LAB").size(11).color(pal.warning));
             for ch in ChannelTab::EXPERIMENTAL_CHANNELS {
                 list = list.push(self.channel_row_btn(ch));
             }
@@ -910,19 +1106,19 @@ impl LoraDesktopApp {
         let model_label = self.selected_model.as_deref().unwrap_or("no-model-loaded");
         let busy =
             self.active_run_id.is_some() || self.telemetry.dashboard.status_strip.active_task_busy;
-        let dock_dot_color = if busy { AMBER } else { GREEN };
+        let dock_dot_color = if busy { pal.warning } else { pal.nominal };
 
         let user_dock = container(
             row![
                 container(text(if busy { "RUN" } else { "OK" }).size(10))
                     .padding(Padding::from([3, 6]))
                     .style(theme::pill_container(
-                        if busy { AMBER_SOFT } else { GREEN_SOFT },
+                        if busy { AMBER_SOFT } else { pal.nominal_soft },
                         dock_dot_color,
                         dock_dot_color,
                     )),
                 column![
-                    text(model_label).size(12).color(TEXT_PRIMARY),
+                    text(model_label).size(12).color(pal.text_primary),
                     text(
                         self.telemetry
                             .dashboard
@@ -931,13 +1127,18 @@ impl LoraDesktopApp {
                             .as_str()
                     )
                     .size(11)
-                    .color(TEXT_MUTED),
+                    .color(pal.text_muted),
                 ]
                 .spacing(1)
                 .width(Length::Fill),
                 button(text("Sync").size(11))
                     .padding(Padding::from([4, 8]))
-                    .style(theme::solid_button(BG_SELECTED, BLURPLE, TEXT_PRIMARY))
+                    .style(theme::solid_button_with_radius(
+                        pal.bg_elevated,
+                        pal.accent_primary,
+                        pal.text_primary,
+                        self.dashboard.control_radius(),
+                    ))
                     .on_press(Message::RefreshTelemetry),
             ]
             .spacing(8)
@@ -945,7 +1146,7 @@ impl LoraDesktopApp {
         )
         .padding(10)
         .width(Length::Fill)
-        .style(theme::surface_container(BG_DOCK));
+        .style(theme::surface_container(pal.bg_dock));
 
         container(
             column![
@@ -959,17 +1160,20 @@ impl LoraDesktopApp {
         )
         .width(Length::Fixed(236.0))
         .height(Length::Fill)
-        .style(theme::surface_container(BG_SIDEBAR))
+        .style(theme::surface_container(pal.bg_sidebar))
         .into()
     }
 
     fn channel_row_btn(&self, ch: ChannelTab) -> Element<'_, Message> {
+        let pal = self.dashboard.palette();
         let active = self.active_channel == ch;
         button(
             row![
-                text("#")
-                    .size(14)
-                    .color(if active { LORA_MAGENTA } else { TEXT_MUTED }),
+                text("#").size(14).color(if active {
+                    pal.accent_secondary
+                } else {
+                    pal.text_muted
+                }),
                 text(ch.slug()).size(13),
             ]
             .spacing(8)
@@ -977,24 +1181,37 @@ impl LoraDesktopApp {
         )
         .padding(Padding::from([7, 10]))
         .width(Length::Fill)
-        .style(theme::channel_button(active))
+        .style(theme::palette_channel_button(
+            active,
+            pal.bg_elevated,
+            pal.bg_card,
+            pal.border_accent,
+            pal.text_primary,
+            pal.text_secondary,
+            pal.text_muted,
+        ))
         .on_press(Message::SelectChannel(ch))
         .into()
     }
 
     fn view_top_header(&self) -> Element<'_, Message> {
+        let pal = self.dashboard.palette();
         let model_pill =
             container(text(self.selected_model.as_deref().unwrap_or("No Active Model")).size(11))
                 .padding(Padding::from([4, 10]))
                 .style(theme::pill_container(
-                    LORA_MAGENTA_SOFT,
-                    LORA_MAGENTA,
-                    BORDER_ACCENT,
+                    pal.accent_secondary_soft,
+                    pal.accent_secondary,
+                    pal.border_accent,
                 ));
 
         let airgap_pill = container(text("AIR-GAPPED").size(11))
             .padding(Padding::from([4, 9]))
-            .style(theme::pill_container(GREEN_SOFT, GREEN, GREEN));
+            .style(theme::pill_container(
+                pal.nominal_soft,
+                pal.nominal,
+                pal.nominal,
+            ));
 
         let stop_btn = button(
             text(if self.active_run_id.is_some() {
@@ -1006,9 +1223,19 @@ impl LoraDesktopApp {
         )
         .padding(Padding::from([5, 11]))
         .style(if self.active_run_id.is_some() {
-            theme::solid_button(RED, RED_HOVER, TEXT_PRIMARY)
+            theme::solid_button_with_radius(
+                pal.critical,
+                RED_HOVER,
+                TEXT_PRIMARY,
+                self.dashboard.control_radius(),
+            )
         } else {
-            theme::solid_button(BG_SELECTED, RED, TEXT_SECONDARY)
+            theme::solid_button_with_radius(
+                pal.bg_elevated,
+                pal.critical,
+                pal.text_secondary,
+                self.dashboard.control_radius(),
+            )
         })
         .on_press(Message::StopActiveTask);
 
@@ -1021,15 +1248,24 @@ impl LoraDesktopApp {
             .size(12),
         )
         .padding(Padding::from([5, 10]))
-        .style(theme::solid_button(BG_SELECTED, BLURPLE, TEXT_PRIMARY))
+        .style(theme::solid_button_with_radius(
+            pal.bg_elevated,
+            pal.accent_primary,
+            pal.text_primary,
+            self.dashboard.control_radius(),
+        ))
         .on_press(Message::ToggleInspector);
 
         container(
             row![
-                text("#").size(18).color(LORA_MAGENTA),
+                text("#").size(18).color(pal.accent_secondary),
                 column![
-                    text(self.active_channel.slug()).size(15),
-                    text(self.active_channel.topic()).size(11).color(TEXT_MUTED),
+                    text(self.active_channel.slug())
+                        .size(15)
+                        .color(pal.text_primary),
+                    text(self.active_channel.topic())
+                        .size(11)
+                        .color(pal.text_muted),
                 ]
                 .spacing(1)
                 .width(Length::Fill),
@@ -1043,11 +1279,12 @@ impl LoraDesktopApp {
         )
         .padding(Padding::from([8, 16]))
         .width(Length::Fill)
-        .style(theme::surface_container(BG_STAGE))
+        .style(theme::surface_container(pal.bg_stage))
         .into()
     }
 
     fn view_main_stage(&self) -> Element<'_, Message> {
+        let pal = self.dashboard.palette();
         let body: Element<'_, Message> = match self.active_channel {
             ChannelTab::Dashboard => self.view_dashboard_channel(),
             ChannelTab::Chat => self.view_chat_channel(),
@@ -1064,15 +1301,22 @@ impl LoraDesktopApp {
 
         let footer = container(
             row![
-                text(self.status_banner.as_str()).size(11).color(TEXT_MUTED),
+                text(self.status_banner.as_str())
+                    .size(11)
+                    .color(pal.text_muted),
                 space::horizontal(),
-                text("lora.desktop.native.v1").size(11).color(TEXT_MUTED),
+                text(format!(
+                    "{} · lora.desktop.native.v1",
+                    self.dashboard.prefs.theme_preset.code()
+                ))
+                .size(11)
+                .color(pal.text_muted),
             ]
             .align_y(Alignment::Center),
         )
         .padding(Padding::from([6, 16]))
         .width(Length::Fill)
-        .style(theme::surface_container(BG_DOCK));
+        .style(theme::surface_container(pal.bg_dock));
 
         container(
             column![
@@ -1087,129 +1331,12 @@ impl LoraDesktopApp {
         )
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(theme::surface_container(BG_STAGE))
-        .into()
-    }
-
-    fn metric_card<'a>(
-        title: &'a str,
-        value: String,
-        subtitle: String,
-        accent: iced::Color,
-    ) -> Element<'a, Message> {
-        container(
-            column![
-                text(title).size(11).color(TEXT_MUTED),
-                text(value).size(20).color(accent),
-                text(subtitle).size(11).color(TEXT_SECONDARY),
-            ]
-            .spacing(4),
-        )
-        .padding(14)
-        .width(Length::Fill)
-        .style(theme::card_container(BG_CARD, BORDER_SUBTLE, 8.0))
+        .style(theme::surface_container(pal.bg_stage))
         .into()
     }
 
     fn view_dashboard_channel(&self) -> Element<'_, Message> {
-        let vm = &self.telemetry.dashboard;
-        let kpis = row![
-            Self::metric_card(
-                "INSTALLED MODELS",
-                vm.installed_model_count.to_string(),
-                vm.status_strip
-                    .active_model_alias
-                    .as_deref()
-                    .unwrap_or("Import a .gguf in #model-library")
-                    .to_string(),
-                LORA_MAGENTA,
-            ),
-            Self::metric_card(
-                "AVAILABLE RAM",
-                format!("{} MiB", vm.available_ram_mib),
-                format!("Total physical: {} MiB", vm.total_ram_mib),
-                GREEN,
-            ),
-            Self::metric_card(
-                "COMPUTE TOPOLOGY",
-                vm.cpu_summary.clone(),
-                format!("Destination: {}", vm.status_strip.execution_destination),
-                TEXT_PRIMARY,
-            ),
-            Self::metric_card(
-                "AUDIT EVENTS",
-                vm.recent_audit_count.to_string(),
-                format!("Tuning receipts: {}", self.telemetry.tuning_receipts_count),
-                BLURPLE,
-            ),
-        ]
-        .spacing(12);
-
-        let quick_actions = container(
-            column![
-                text("Quick Channel Jump").size(14),
-                row![
-                    button(text("Open #chat").size(12))
-                        .padding(Padding::from([8, 14]))
-                        .style(theme::solid_button(BLURPLE, BLURPLE_HOVER, TEXT_PRIMARY))
-                        .on_press(Message::SelectChannel(ChannelTab::Chat)),
-                    button(text("Open #model-library").size(12))
-                        .padding(Padding::from([8, 14]))
-                        .style(theme::solid_button(BG_SELECTED, BLURPLE, TEXT_PRIMARY))
-                        .on_press(Message::SelectChannel(ChannelTab::ModelLibrary)),
-                    button(text("Run Workflow Pipeline").size(12))
-                        .padding(Padding::from([8, 14]))
-                        .style(theme::solid_button(BG_SELECTED, BLURPLE, TEXT_PRIMARY))
-                        .on_press(Message::RunWorkflowPressed),
-                    button(text("Capture Attested Snapshot").size(12))
-                        .padding(Padding::from([8, 14]))
-                        .style(theme::solid_button(BG_SELECTED, GREEN, TEXT_PRIMARY))
-                        .on_press(Message::CaptureAttestedSnapshotPressed),
-                ]
-                .spacing(10),
-            ]
-            .spacing(10),
-        )
-        .padding(16)
-        .width(Length::Fill)
-        .style(theme::card_container(BG_CARD, BORDER_SUBTLE, 8.0));
-
-        let snapshot_card = if let Some((snap, verified)) = &self.latest_snapshot {
-            container(
-                column![
-                    text("Latest Desktop Snapshot Attestation").size(13),
-                    text(format!(
-                        "screen={:?} · verified={verified} · sha256={}",
-                        snap.screen,
-                        snap.snapshot_sha256.as_deref().unwrap_or("none")
-                    ))
-                    .size(11)
-                    .font(Font::MONOSPACE)
-                    .color(if *verified { GREEN } else { RED }),
-                ]
-                .spacing(4),
-            )
-            .padding(14)
-            .width(Length::Fill)
-            .style(theme::card_container(BG_CARD, GREEN, 8.0))
-        } else {
-            container(
-                text("Click 'Capture Attested Snapshot' to compute and verify a domain-separated `lora.desktop.snapshot.v1` digest.")
-                    .size(12)
-                    .color(TEXT_MUTED),
-            )
-            .padding(14)
-            .width(Length::Fill)
-            .style(theme::card_container(BG_CARD, BORDER_SUBTLE, 8.0))
-        };
-
-        scrollable(
-            column![kpis, quick_actions, snapshot_card]
-                .spacing(14)
-                .padding(18),
-        )
-        .height(Length::Fill)
-        .into()
+        dashboard::view_dashboard(self)
     }
 
     fn view_chat_channel(&self) -> Element<'_, Message> {
@@ -1933,6 +2060,8 @@ impl LoraDesktopApp {
     }
 
     fn view_telemetry_inspector(&self) -> Element<'_, Message> {
+        let pal = self.dashboard.palette();
+        let radius = self.dashboard.card_radius();
         let vm = &self.telemetry.dashboard;
         let mut audits_col = Column::new().spacing(6);
         for (seq, outcome, resource, _) in self.telemetry.recent_audits.iter().take(6) {
@@ -1941,36 +2070,44 @@ impl LoraDesktopApp {
                     column![
                         text(format!("#{seq} {outcome}"))
                             .size(11)
-                            .color(TEXT_PRIMARY),
-                        text(resource).size(10).color(TEXT_MUTED),
+                            .color(pal.text_primary),
+                        text(resource).size(10).color(pal.text_muted),
                     ]
                     .spacing(1),
                 )
                 .padding(8)
                 .width(Length::Fill)
-                .style(theme::card_container(BG_CARD, BORDER_SUBTLE, 6.0)),
+                .style(theme::card_container(
+                    pal.bg_card,
+                    pal.border_subtle,
+                    radius.min(6.0),
+                )),
             );
         }
 
         let panel = column![
-            text("LIVE TELEMETRY RADAR").size(11).color(TEXT_MUTED),
+            text("LIVE TELEMETRY RADAR").size(11).color(pal.text_muted),
             container(
                 column![
-                    text("Host Memory").size(12),
+                    text("Host Memory").size(12).color(pal.text_primary),
                     text(format!(
                         "{} / {} MiB",
                         vm.available_ram_mib, vm.total_ram_mib
                     ))
                     .size(13)
-                    .color(GREEN),
-                    text(&vm.cpu_summary).size(11).color(TEXT_MUTED),
+                    .color(pal.nominal),
+                    text(&vm.cpu_summary).size(11).color(pal.text_muted),
                 ]
                 .spacing(4),
             )
             .padding(10)
             .width(Length::Fill)
-            .style(theme::card_container(BG_CARD, BORDER_SUBTLE, 8.0)),
-            text("RECENT AUDIT TRAIL").size(11).color(TEXT_MUTED),
+            .style(theme::card_container(
+                pal.bg_card,
+                pal.border_subtle,
+                radius
+            )),
+            text("RECENT AUDIT TRAIL").size(11).color(pal.text_muted),
             scrollable(audits_col).height(Length::Fill),
         ]
         .spacing(10)
@@ -1980,7 +2117,7 @@ impl LoraDesktopApp {
         container(panel)
             .width(Length::Fixed(268.0))
             .height(Length::Fill)
-            .style(theme::surface_container(BG_SIDEBAR))
+            .style(theme::surface_container(pal.bg_sidebar))
             .into()
     }
 

@@ -8,7 +8,7 @@ use lora_core::{
 };
 use lora_desktop::app::LoraDesktopApp;
 use lora_desktop::backend::{AppWorkerEvent, DenyByDefaultDesktopPrompt, GuiApprovalPromptPort};
-use lora_desktop::build_consent_preview;
+use lora_desktop::{build_consent_preview, load_window_icon};
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
 };
@@ -229,6 +229,8 @@ fn main() {
     .window(window::Settings {
         size: Size::new(1380.0, 860.0),
         min_size: Some(Size::new(980.0, 620.0)),
+        visible: true,
+        icon: load_window_icon(),
         ..Default::default()
     })
     .centered()

@@ -9,6 +9,8 @@ use lora_core::{
 };
 use lora_desktop::app::{ChannelTab, LoraDesktopApp, Message, WorkspaceGuild};
 use lora_desktop::backend::{AppWorkerEvent, GuiApprovalPromptPort};
+use lora_desktop::dashboard::{DashboardPreset, DashboardWidgetKind, HudDensity, WidgetSpan};
+use lora_desktop::theme::{CyberThemePreset, HudGeometry};
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
 };
@@ -274,4 +276,125 @@ fn native_discord_shell_navigation_modal_consent_broker_and_snapshot_journey() {
     let (snap, snap_ok) = app.latest_snapshot.as_ref().unwrap();
     assert!(*snap_ok);
     assert!(verify_desktop_snapshot(snap).is_ok());
+}
+
+#[test]
+fn cyberpunk_dashboard_customization_themes_macros_and_persistence_journey() {
+    let tmp = TempDir::new().expect("tempdir");
+    {
+        let (mut app, _) = open_test_app(&tmp, false);
+        assert_eq!(app.active_channel, ChannelTab::Dashboard);
+
+        // 1. Cycle all 4 layout presets and render full pure-Rust view trees
+        for preset in DashboardPreset::ALL {
+            let _ = app.update(Message::SelectDashboardPreset(preset));
+            assert_eq!(app.dashboard.prefs.preset, preset);
+            drop(app.view());
+        }
+
+        // 2. Open Customize HUD drawer and exercise all 11 Cyberpunk cinema/game/anime/FUI themes
+        let _ = app.update(Message::ToggleCustomizeHud);
+        assert!(app.dashboard.customize_open);
+        for theme in CyberThemePreset::ALL {
+            let _ = app.update(Message::SelectCyberTheme(theme));
+            assert_eq!(app.dashboard.prefs.theme_preset, theme);
+            let _ = app.theme();
+            drop(app.view());
+        }
+
+        // 3. Density, Tactical Sharp vs Sleek Modern frame geometry, and visual toggles
+        for density in HudDensity::ALL {
+            let _ = app.update(Message::SelectHudDensity(density));
+            assert_eq!(app.dashboard.prefs.density, density);
+        }
+        for geometry in HudGeometry::ALL {
+            let _ = app.update(Message::SelectHudGeometry(geometry));
+            assert_eq!(app.dashboard.prefs.geometry, geometry);
+        }
+        let _ = app.update(Message::ToggleNeonBorders(false));
+        let _ = app.update(Message::ToggleSparklineGrid(false));
+        assert!(!app.dashboard.prefs.neon_borders);
+        assert!(!app.dashboard.prefs.show_sparkline_grid);
+        drop(app.view());
+
+        // 4. Widget visibility, collapse, span toggle, and reordering
+        let _ = app.update(Message::ToggleWidgetCollapsed(
+            DashboardWidgetKind::SystemReactor,
+        ));
+        let _ = app.update(Message::ToggleWidgetSpan(
+            DashboardWidgetKind::SystemReactor,
+        ));
+        let _ = app.update(Message::MoveWidgetUp(DashboardWidgetKind::WorkflowMatrix));
+        let _ = app.update(Message::ToggleWidgetVisible(
+            DashboardWidgetKind::AttestationRadar,
+        ));
+        assert!(app
+            .dashboard
+            .prefs
+            .widgets
+            .iter()
+            .find(|w| w.kind == DashboardWidgetKind::SystemReactor)
+            .is_some_and(|w| w.collapsed && w.span == WidgetSpan::Wide));
+        drop(app.view());
+
+        // 5. Custom prompt macro creation + quick prompt launch fallback (stages prompt safely)
+        let initial_macros = app.dashboard.prefs.custom_macros.len();
+        let _ = app.update(Message::MacroLabelChanged("CyberAudit".to_string()));
+        let _ = app.update(Message::MacroPromptChanged(
+            "Inspect local architecture invariants".to_string(),
+        ));
+        let _ = app.update(Message::AddPromptMacro);
+        assert_eq!(app.dashboard.prefs.custom_macros.len(), initial_macros + 1);
+
+        let _ = app.update(Message::QuickPromptChanged(
+            "Summarize host telemetry".to_string(),
+        ));
+        let _ = app.update(Message::SubmitQuickPrompt);
+        assert!(app.dashboard.quick_prompt_input.is_empty());
+        assert_eq!(app.composer_input, "Summarize host telemetry");
+        assert_eq!(app.active_channel, ChannelTab::ModelLibrary);
+
+        // Pin specific preferences to verify disk persistence in `dashboard_hud.json`
+        let _ = app.update(Message::SelectCyberTheme(CyberThemePreset::GhostInTheShell));
+        let _ = app.update(Message::SelectHudGeometry(HudGeometry::CyberSharp));
+        let _ = app.update(Message::SelectHudDensity(HudDensity::Compact));
+    }
+
+    // 6. Re-open service data dir and confirm HUD state & custom macros persist across restarts
+    let (mut reopened, _) = open_test_app(&tmp, false);
+    assert_eq!(
+        reopened.dashboard.prefs.theme_preset,
+        CyberThemePreset::GhostInTheShell
+    );
+    assert_eq!(reopened.dashboard.prefs.geometry, HudGeometry::CyberSharp);
+    assert_eq!(reopened.dashboard.prefs.density, HudDensity::Compact);
+    assert!(!reopened.dashboard.prefs.neon_borders);
+    assert!(reopened
+        .dashboard
+        .prefs
+        .custom_macros
+        .iter()
+        .any(|m| m.label == "CyberAudit"));
+    drop(reopened.view());
+
+    let idx = reopened
+        .dashboard
+        .prefs
+        .custom_macros
+        .iter()
+        .position(|m| m.label == "CyberAudit")
+        .unwrap();
+    let _ = reopened.update(Message::RemovePromptMacro(idx));
+    assert!(!reopened
+        .dashboard
+        .prefs
+        .custom_macros
+        .iter()
+        .any(|m| m.label == "CyberAudit"));
+
+    let _ = reopened.update(Message::ResetDashboardLayout);
+    assert_eq!(
+        reopened.dashboard.prefs.theme_preset,
+        CyberThemePreset::NightCity2077
+    );
 }
