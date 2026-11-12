@@ -927,10 +927,10 @@ impl LoraDesktopApp {
         ChatMessageEntry::assistant(
             "welcome-0",
             "System Shell",
-            "Welcome to **Lora Agent Desktop (`v0.2.23`)** — 100% pure-Rust native AI agent studio.\n\n\
-             - **Air-Gapped Runtime**: Zero WebView, zero HTML/JS bridge, zero external egress.\n\
-             - **SQLite Tasks & Multi-Project Scope**: Manage tasks in `Tasks DB`, isolate folders in `Projects`, and tune `llama.cpp` inference locally.\n\n\
-             Press `Ctrl+K` for the Command Palette, drag & drop any code/image/audio/`.gguf` file, or pick a template below to start.",
+            "Welcome to **Lora Agent Desktop (`v0.2.24`)** — 100% pure-Rust native AI agent studio.\n\n\
+             - **Execution Control & Context Meter**: Pick `AgentKind`, `ReasoningEffort`, `{LOCAL | API}` access mode, and watch live token budget allocation.\n\
+             - **SQLite Workspaces, Tasks & Daily, Code & Env**: Manage tasks & Daily logs, grant `Trusted Folders` policies, store scoped `.env` secrets, and tune `llama.cpp` locally.\n\n\
+             Press `Ctrl+K` for the Command Palette, drag & drop any file/folder/`.env`/`.gguf`, or pick a template below to start.",
             false,
         )
     }
@@ -2111,7 +2111,7 @@ impl LoraDesktopApp {
             }
             Message::RuntimeEvent(ev) => match ev {
                 Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-                    if modifiers.command() {
+                    if modifiers.command() || modifiers.control() {
                         if let keyboard::Key::Character(ref ch) = key {
                             if ch.as_str().eq_ignore_ascii_case("k") {
                                 self.command_palette_open = !self.command_palette_open;

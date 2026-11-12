@@ -19,14 +19,14 @@
 - **Default-Deny Policy Gate**: Capability-based security model binding operations to callers, runs, normalized resource scopes, and short-lived epochs.
 - **Untrusted Observation Envelopes**: File contents and tool outputs are strictly isolated as untrusted data inside model context, preventing prompt-injection privilege escalation.
 - **Single-Writer WAL Persistence**: Local SQLite database with ordered transaction commits, schema version gating, pre-dispatch intent journaling, and startup crash reconciliation.
-- **Opt-in Loopback API & Desktop Shell**: Loopback-only HTTP/SSE daemon with Host/Origin DNS-rebinding protection (`R08`) alongside a WCAG 2.2 AA compliant desktop interface.
+- **Opt-in Loopback API & Desktop Agent Workstation (`lora-desktop`)**: Loopback-only HTTP/SSE daemon (`R08`) paired with a pure-Rust `iced 0.14` cyberpunk desktop studio featuring `AgentKind` / `ReasoningEffort` / `{LOCAL | API}` routing, live context token budgeting, `Tasks & Daily` logs, `Trusted Folders`, scoped `.env` secrets, `llama.cpp` tuning, `Ctrl+K` Command Palette, undo rollback, and the customizable **Capri** companion widget.
 
 ---
 
 ## Workspace Architecture
 
 ```text
-├── Cargo.toml                  # Workspace root (version = "0.2.23")
+├── Cargo.toml                  # Workspace root (version = "0.2.24")
 ├── crates/
 │   ├── lora-protocol/          # v1 32-bit BE JSON framing, closed schemas & streaming GGUF v2/v3 parser
 │   ├── lora-core/              # App service, SQLite store, registry, HIE, policy gate & RAG
@@ -176,6 +176,17 @@ lora-desktop --dump-snapshot
 lora-api --bind 127.0.0.1:8421 --token "$LORA_API_TOKEN"
 # Endpoints: /v1/health, /v1/capabilities, /v1/models, /v1/runs, /v1/runs/{id}/events, /v1/index, /v1/search, /v1/patch/preview, /v1/patch/apply, /v1/patch/rollback, /v1/plugins, /v1/plugins/stage, /v1/plugins/{id}/activate, /v1/plugins/{id}/disable, /v1/plugins/{id}/fault, /v1/plugins/{id}/rollback, /v1/adapter/evaluate, /v1/adapter/dataset-split, /v1/hardware/tune, /v1/hardware/tuning-receipts, /v1/audit/events, /v1/audit/prune, /v1/audit/export, /v1/egress/preview, /v1/egress/verify, /v1/catalog/validate, /v1/context-budget, /v1/broker/validate, /v1/doctor, /v1/models/classify, /v1/agent/handoff, /v1/workflow/run, /v1/workflow/{id}/cancel, /v1/workflow/receipts, /v1/workflow/receipts/{id}, /v1/workflow/receipts/prune, /v1/workflow/validate
 ```
+
+---
+
+## Desktop Agent Workstation (`lora-desktop` · `v0.2.24`)
+
+Built natively in pure Rust with `iced 0.14` (`wgpu` GPU + `tiny-skia` CPU fallback, zero WebView/HTML), `lora-desktop` provides a customizable cyberpunk AI studio:
+
+- **Execution Controls & Live Context Meter**: Switch `AgentKind` (`General`, `Coder`, `Daily/Plan`, `Researcher`, `Reviewer`), `ReasoningEffort` (`Low`, `Medium`, `High`, `Max`), `{LOCAL | API}` execution routing (defaulting to air-gapped local `llama.cpp`, or opt-in OpenAI-compatible endpoints), local GGUF status, and live token budget tracking.
+- **Smart Drag & Drop + Scoped Workspace (`#Code & Env`)**: Drop files/media into `#Agent Chat`, folders directly into `Trusted Folders` (`DENY`, `READ`, `READ/WRITE`, `FULL TRUST`), `.env` files into SQLite-backed `Env Manager` (Project/Global scopes with secret masking), or `.gguf` weights into `Models`.
+- **SQLite Projects, Tasks & Daily Log**: Manage isolated projects, filterable `Tasks & Daily` queues with completion timestamps (`Done ✓`), 1-click AI Daily summary, and interactive `llama.cpp` runtime parameters.
+- **Modern UX & Motion + Capri Companion**: `Ctrl+K` / `Cmd+K` Command Palette, Chain-of-Thought & Artifacts drawer, Pause/Resume delta buffering, `Ctrl+Z` / `Cmd+Z` reversible undo stack, WCAG AA/AAA dark themes with custom Hue Matrix, and the dockable, customizable **Capri** Canvas companion widget.
 
 ---
 
