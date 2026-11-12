@@ -17,7 +17,7 @@ Solid arrows indicate request or data flow. Dotted arrows identify later integra
 ```mermaid
 flowchart TD
     CLI[CLI and trusted approval prompt] --> Core[Application services]
-    Desktop[Desktop webview via Tauri commands] -.-> Core
+    Desktop[Pure-Rust native client via iced] -.-> Core
     API[Authenticated loopback API] -.-> Core
     Core --> Agent[Bounded agent loop]
     Agent --> Gate[Policy and approval]

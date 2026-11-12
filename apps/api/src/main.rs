@@ -20,12 +20,13 @@ use lora_core::{
 use lora_core::{
     compute_extension_manifest_digest, compute_patch_receipt_digest, verify_adapter_studio_outcome,
     verify_agent_run_outcome, verify_audit_attestation_bundle, verify_benchmark_receipt,
-    verify_compensating_patch_receipt, verify_dataset_split_manifest, verify_desktop_snapshot,
-    verify_held_out_evaluation_receipt, verify_qualification_report, verify_receipt_self_integrity,
-    verify_rollback_drill_receipt, verify_tuning_receipt, verify_workflow_attestation_bundle,
-    verify_workflow_receipt, AdapterStudioOutcome, AgentRunOutcome, AuditAttestationBundle,
-    BenchmarkReceipt, DatasetSplitManifest, DesktopScreen, DesktopSnapshot, ExecutionPermit,
-    QualificationReport, TuningReceipt, UpdateRollbackDrillReceipt, WorkflowAttestationBundle,
+    verify_broker_receipt, verify_compensating_patch_receipt, verify_dataset_split_manifest,
+    verify_desktop_snapshot, verify_held_out_evaluation_receipt, verify_qualification_report,
+    verify_receipt_self_integrity, verify_rollback_drill_receipt, verify_tuning_receipt,
+    verify_workflow_attestation_bundle, verify_workflow_receipt, AdapterStudioOutcome,
+    AgentRunOutcome, AuditAttestationBundle, BenchmarkReceipt, BrokerExecutionReceipt,
+    DatasetSplitManifest, DesktopScreen, DesktopSnapshot, ExecutionPermit, QualificationReport,
+    TuningReceipt, UpdateRollbackDrillReceipt, WorkflowAttestationBundle,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -2040,18 +2041,83 @@ fn handle_http_connection(
             }
 
             let now = now_epoch_ms();
-            match broker_gate.validate_and_consume_permit(&permit, now) {
-                Ok(status) => {
+            match broker_gate.execute_and_attest_permit(&permit, now) {
+                Ok(receipt) => {
                     let body = serde_json::json!({
-                        "status": status,
+                        "status": receipt.status,
                         "permit_id": permit.permit_id,
                         "valid": true,
+                        "domain": "lora.broker.permit.v1",
+                        "receipt": receipt,
                     })
                     .to_string();
                     write_http_response(stream, "200 OK", "application/json", &body)
                 }
                 Err(e) => {
                     let err = serde_json::json!({
+                        "code": e.reason_code(),
+                        "detail": e.redacted_message(),
+                    })
+                    .to_string();
+                    write_http_response(stream, "400 Bad Request", "application/json", &err)
+                }
+            }
+        }
+        ("POST", "/v1/broker/verify-receipt") => {
+            let req_json: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(j) => j,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid json body: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+
+            let receipt_val = req_json
+                .get("receipt")
+                .cloned()
+                .unwrap_or_else(|| req_json.clone());
+            let receipt: BrokerExecutionReceipt = match serde_json::from_value(receipt_val) {
+                Ok(r) => r,
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "code": "malformed_request",
+                        "detail": format!("invalid broker execution receipt payload: {e}"),
+                    })
+                    .to_string();
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json",
+                        &err,
+                    );
+                }
+            };
+
+            match verify_broker_receipt(&receipt) {
+                Ok(()) => {
+                    let body = serde_json::json!({
+                        "verified": true,
+                        "receipt_id": receipt.receipt_id,
+                        "permit_id": receipt.permit_id,
+                        "status": receipt.status,
+                        "digest": receipt.receipt_sha256,
+                        "domain": "lora.broker.receipt.v1",
+                    })
+                    .to_string();
+                    write_http_response(stream, "200 OK", "application/json", &body)
+                }
+                Err(e) => {
+                    let err = serde_json::json!({
+                        "verified": false,
                         "code": e.reason_code(),
                         "detail": e.redacted_message(),
                     })

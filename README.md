@@ -26,7 +26,7 @@
 ## Workspace Architecture
 
 ```text
-├── Cargo.toml                  # Workspace root (version = "0.2.22")
+├── Cargo.toml                  # Workspace root (version = "0.2.23")
 ├── crates/
 │   ├── lora-protocol/          # v1 32-bit BE JSON framing, closed schemas & streaming GGUF v2/v3 parser
 │   ├── lora-core/              # App service, SQLite store, registry, HIE, policy gate & RAG
@@ -36,7 +36,7 @@
 ├── apps/
 │   ├── cli/                    # Trusted terminal composition root (lora)
 │   ├── api/                    # Opt-in loopback HTTP/SSE daemon (lora-api)
-│   └── desktop/                # Desktop shell view-model & UI bridge (lora-desktop)
+│   └── desktop/                # Pure-Rust native Discord-style desktop client (lora-desktop, iced 0.14)
 ├── tests/fixtures/             # Deterministic synthetic GGUF fixtures & adversarial tests
 ├── benchmarks/                 # Reproducible performance case manifests
 └── docs/                       # Architecture specifications and ADRs
@@ -57,7 +57,7 @@ Lora Agent follows a strict Semantic Versioning progression:
 
 ### Prerequisites
 
-- **Rust**: 1.80+ (stable channel) with `rustfmt` and `clippy`
+- **Rust**: 1.88+ (stable channel) with `rustfmt` and `clippy`
 - **C/C++ Build Tools**: Visual Studio Build Tools (Windows MSVC) or `build-essential` / `clang` (Linux / macOS) plus `cmake` for `--features native-llama-cpp`
 - **Python**: 3.10+ (for documentation validation and packaging)
 
@@ -167,8 +167,10 @@ lora workflow --demo --validate
 lora workflow --list-receipts
 lora workflow --prune-keep 10
 
-# 21. Serve the desktop UI and read-only JSON view-models on loopback only
-lora-desktop --serve 127.0.0.1:8765
+# 21. Launch the pure-Rust native Discord-style desktop client (or dump headless diagnostics)
+lora-desktop
+lora-desktop --dump-view-model
+lora-desktop --dump-snapshot
 
 # 22. Run the authenticated loopback REST/SSE API (127.0.0.1 / [::1] only)
 lora-api --bind 127.0.0.1:8421 --token "$LORA_API_TOKEN"

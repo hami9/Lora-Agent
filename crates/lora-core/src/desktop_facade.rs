@@ -1,6 +1,6 @@
 //! Phase 4 Desktop UX state projection and anti-spoofing approval view-model (`docs/DESKTOP_UX.md`, `R12`).
 //!
-//! Ensures the desktop shell (Tauri 2 + React/TS) consumes the exact same Rust application service
+//! Ensures the pure-Rust native desktop shell (`lora-desktop`) consumes the exact same Rust application service
 //! contracts and reason codes as the CLI, virtualizes long transcripts, and never renders untrusted
 //! file contents inside the trusted approval prompt chrome.
 

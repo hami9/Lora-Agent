@@ -9,19 +9,19 @@ use lora_core::{
     prepare_leakage_free_splits, preview_checked_patch, rollback_applied_patch,
     validate_catalog_variant, validate_specialist_handoff, validate_workflow_job,
     verify_adapter_studio_outcome, verify_agent_run_outcome, verify_audit_attestation_bundle,
-    verify_benchmark_receipt, verify_compensating_patch_receipt, verify_dataset_split_manifest,
-    verify_desktop_snapshot, verify_qualification_report, verify_receipt_self_integrity,
-    verify_rollback_drill_receipt, verify_tuning_receipt, verify_workflow_attestation_bundle,
-    verify_workflow_receipt, AdapterStudioOutcome, AgentLimits, AgentRunOutcome, ApprovalDecision,
-    ApprovalPromptPort, ApprovalRequest, AuditAttestationBundle, BenchmarkReceipt,
-    BrokerSingleUsePermit, BrokerVerb, CatalogVariantDescriptor, ChatTurn,
-    CompensatingPatchReceipt, ContextBudgetRequest, DatasetSplitManifest, DesktopSnapshot,
-    ExecutionMode, ExecutionPermit, ExtensionManifestV1, HardwareProbePort,
-    HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig, PatchProposal,
-    PrivilegedBrokerGate, QualificationReport, SpecialistHandoffEnvelope, TrainingExample,
-    TuningCacheKey, TuningProfile, TuningReceipt, TuningTrialSample, UpdateRollbackDrillReceipt,
-    WorkflowAttestationBundle, WorkflowJobConfig, WorkflowStepKind, DEFAULT_SAFETY_RESERVE_BYTES,
-    TERMINAL_ASCII_BANNER,
+    verify_benchmark_receipt, verify_broker_receipt, verify_compensating_patch_receipt,
+    verify_dataset_split_manifest, verify_desktop_snapshot, verify_qualification_report,
+    verify_receipt_self_integrity, verify_rollback_drill_receipt, verify_tuning_receipt,
+    verify_workflow_attestation_bundle, verify_workflow_receipt, AdapterStudioOutcome, AgentLimits,
+    AgentRunOutcome, ApprovalDecision, ApprovalPromptPort, ApprovalRequest, AuditAttestationBundle,
+    BenchmarkReceipt, BrokerExecutionReceipt, BrokerSingleUsePermit, BrokerVerb,
+    CatalogVariantDescriptor, ChatTurn, CompensatingPatchReceipt, ContextBudgetRequest,
+    DatasetSplitManifest, DesktopSnapshot, ExecutionMode, ExecutionPermit, ExtensionManifestV1,
+    HardwareProbePort, HeldOutEvaluationReceipt, LoraApplicationService, LoraError, LoraJobConfig,
+    PatchProposal, PrivilegedBrokerGate, QualificationReport, SpecialistHandoffEnvelope,
+    TrainingExample, TuningCacheKey, TuningProfile, TuningReceipt, TuningTrialSample,
+    UpdateRollbackDrillReceipt, WorkflowAttestationBundle, WorkflowJobConfig, WorkflowStepKind,
+    DEFAULT_SAFETY_RESERVE_BYTES, TERMINAL_ASCII_BANNER,
 };
 use lora_platform::{
     resolve_default_worker_spawner, OsScopedFileExecutor, OsStoreLockPort, SysinfoHardwareProbe,
@@ -445,6 +445,12 @@ enum Commands {
         /// Single-use challenge nonce
         #[arg(long, default_value = "nonce-cli-0001")]
         nonce: String,
+        /// Optional output path to export an attested BrokerExecutionReceipt JSON
+        #[arg(long)]
+        export_receipt: Option<PathBuf>,
+        /// Optional path to a BrokerExecutionReceipt JSON file to verify cryptographic attestation
+        #[arg(long)]
+        verify_receipt: Option<PathBuf>,
     },
 
     /// Validate a specialist sub-agent delegation envelope (`docs/AGENT_RUNTIME.md`)
@@ -1792,7 +1798,29 @@ fn run_cli() {
             service,
             session,
             nonce,
+            export_receipt,
+            verify_receipt,
         } => {
+            if let Some(verify_path) = verify_receipt {
+                let content = std::fs::read_to_string(&verify_path).map_err(|e| {
+                    LoraError::Io(format!("failed to read broker receipt file: {e}"))
+                })?;
+                let receipt: BrokerExecutionReceipt =
+                    serde_json::from_str(&content).map_err(|e| {
+                        LoraError::MalformedArtifact(format!(
+                            "invalid BrokerExecutionReceipt JSON: {e}"
+                        ))
+                    })?;
+                verify_broker_receipt(&receipt)?;
+                println!(
+                    "Broker Execution Receipt Attestation: verified (receipt_id: {}, status: {}, digest: {})",
+                    receipt.receipt_id,
+                    receipt.status.as_str(),
+                    receipt.receipt_sha256.as_deref().unwrap_or("none")
+                );
+                return Ok(());
+            }
+
             let mut gate = PrivilegedBrokerGate::new(vec!["lora-local-service".to_string()]);
             let verb = BrokerVerb::RestartAllowlistedService {
                 service_name: service.clone(),
@@ -1808,10 +1836,26 @@ fn run_cli() {
                 ),
                 expires_at_ms: now + 60_000,
             };
-            let status = gate.validate_and_consume_permit(&permit, now)?;
+            let receipt = gate.execute_and_attest_permit(&permit, now)?;
             println!("Broker service : {service}");
             println!("Permit digest  : {}", permit.request_digest);
-            println!("Status         : {status:?}");
+            println!(
+                "Receipt digest : {}",
+                receipt.receipt_sha256.as_deref().unwrap_or("none")
+            );
+            println!("Status         : {:?}", receipt.status);
+            if let Some(export_path) = export_receipt {
+                let json = serde_json::to_string_pretty(&receipt).map_err(|e| {
+                    LoraError::MalformedArtifact(format!("failed to serialize broker receipt: {e}"))
+                })?;
+                std::fs::write(&export_path, json).map_err(|e| {
+                    LoraError::Io(format!("failed to write broker receipt file: {e}"))
+                })?;
+                println!(
+                    "Exported broker execution receipt to {}",
+                    export_path.display()
+                );
+            }
             Ok(())
         }
         Commands::HandoffCheck {

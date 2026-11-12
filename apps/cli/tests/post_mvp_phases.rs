@@ -3638,3 +3638,77 @@ fn test_agent_run_outcome_attestation_cli() {
     let bad_stderr = String::from_utf8_lossy(&bad_verify_out.stderr);
     assert!(bad_stderr.contains("agent run outcome digest mismatch"));
 }
+
+#[test]
+fn test_broker_permit_and_receipt_attestation_cli() {
+    let lora_bin = env!("CARGO_BIN_EXE_lora");
+    let tmp = TempDir::new().unwrap();
+    let rcpt_path = tmp.path().join("broker_receipt.json");
+
+    // 1. Export attested BrokerExecutionReceipt via `lora broker --export-receipt`
+    let export_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "broker",
+            "--service",
+            "lora-local-service",
+            "--session",
+            "sess-cli-attest",
+            "--nonce",
+            "nonce-cli-attest-01",
+            "--export-receipt",
+            rcpt_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        export_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&export_out.stderr)
+    );
+    let export_stdout = String::from_utf8_lossy(&export_out.stdout);
+    assert!(export_stdout.contains("Receipt digest :"));
+    assert!(export_stdout.contains("Exported broker execution receipt to"));
+
+    // 2. Verify exported BrokerExecutionReceipt via `lora broker --verify-receipt`
+    let verify_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "broker",
+            "--verify-receipt",
+            rcpt_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        verify_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&verify_out.stderr)
+    );
+    let verify_stdout = String::from_utf8_lossy(&verify_out.stdout);
+    assert!(verify_stdout.contains("Broker Execution Receipt Attestation: verified"));
+    assert!(verify_stdout.contains("status: completed"));
+
+    // 3. Tampered broker receipt fails closed
+    let mut receipt: lora_core::BrokerExecutionReceipt =
+        serde_json::from_str(&fs::read_to_string(&rcpt_path).unwrap()).unwrap();
+    receipt.status = lora_core::BrokerStatus::PermissionRequired;
+    let bad_path = tmp.path().join("bad_broker_receipt.json");
+    fs::write(&bad_path, serde_json::to_string_pretty(&receipt).unwrap()).unwrap();
+
+    let bad_out = Command::new(lora_bin)
+        .args([
+            "--data-dir",
+            tmp.path().to_str().unwrap(),
+            "broker",
+            "--verify-receipt",
+            bad_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!bad_out.status.success());
+    let bad_stderr = String::from_utf8_lossy(&bad_out.stderr);
+    assert!(bad_stderr.contains("broker execution receipt digest mismatch"));
+}

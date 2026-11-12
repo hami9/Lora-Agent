@@ -149,7 +149,7 @@ fn loopback_api_live_tcp_socket_e2e() {
             "--token",
             "live-secret-token-42",
             "--max-requests",
-            "70",
+            "72",
         ])
         .spawn()
         .expect("spawn multi-request lora-api");
@@ -753,6 +753,11 @@ fn loopback_api_live_tcp_socket_e2e() {
     assert!(r42.starts_with("HTTP/1.1 200 OK"));
     assert!(r42.contains("\"status\":\"completed\""));
     assert!(r42.contains("\"valid\":true"));
+    assert!(r42.contains("\"domain\":\"lora.broker.permit.v1\""));
+    let (_, body42) = r42.split_once("\r\n\r\n").unwrap();
+    let v42: serde_json::Value = serde_json::from_str(body42).expect("parse broker validate json");
+    let mut broker_receipt: lora_core::BrokerExecutionReceipt =
+        serde_json::from_value(v42["receipt"].clone()).expect("extract BrokerExecutionReceipt");
 
     // (an) POST /v1/broker/validate rejects replay of consumed nonce
     let r43 = send_http(&format!(
@@ -1193,6 +1198,26 @@ fn loopback_api_live_tcp_socket_e2e() {
     ));
     assert!(r70.starts_with("HTTP/1.1 400 Bad Request"));
     assert!(r70.contains("\"verified\":false"));
+
+    // (bp) POST /v1/broker/verify-receipt verifies attested BrokerExecutionReceipt from /v1/broker/validate
+    let body_brk_ok = serde_json::to_string(&broker_receipt).unwrap();
+    let r71 = send_http(&format!(
+        "POST /v1/broker/verify-receipt HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_brk_ok}",
+        body_brk_ok.len()
+    ));
+    assert!(r71.starts_with("HTTP/1.1 200 OK"));
+    assert!(r71.contains("\"verified\":true"));
+    assert!(r71.contains("\"domain\":\"lora.broker.receipt.v1\""));
+
+    // (bq) POST /v1/broker/verify-receipt rejects tampered BrokerExecutionReceipt
+    broker_receipt.executed_at_ms += 1;
+    let body_brk_bad = serde_json::to_string(&broker_receipt).unwrap();
+    let r72 = send_http(&format!(
+        "POST /v1/broker/verify-receipt HTTP/1.1\r\nHost: {bind_addr2}\r\nAuthorization: Bearer live-secret-token-42\r\nContent-Length: {}\r\n\r\n{body_brk_bad}",
+        body_brk_bad.len()
+    ));
+    assert!(r72.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(r72.contains("\"verified\":false"));
 
     let status2 = child2.wait().unwrap();
     assert!(status2.success());

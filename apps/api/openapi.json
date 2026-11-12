@@ -445,13 +445,26 @@
     },
     "/v1/broker/validate": {
       "post": {
-        "summary": "Validate and consume single-use challenge-bound privileged broker permit with replay defense",
+        "summary": "Validate and consume single-use challenge-bound privileged broker permit (lora.broker.permit.v1) with replay defense and return an attested BrokerExecutionReceipt",
         "responses": {
           "200": {
-            "description": "Broker status: completed"
+            "description": "Broker status: completed with attested BrokerExecutionReceipt"
           },
           "400": {
             "description": "Permit expired, replay nonce detected, digest mismatch, or unallowlisted service"
+          }
+        }
+      }
+    },
+    "/v1/broker/verify-receipt": {
+      "post": {
+        "summary": "Verify domain-separated cryptographic attestation digest (lora.broker.receipt.v1) of a BrokerExecutionReceipt",
+        "responses": {
+          "200": {
+            "description": "BrokerExecutionReceipt verified successfully"
+          },
+          "400": {
+            "description": "BrokerExecutionReceipt malformed, missing digest, or tamper detected"
           }
         }
       }

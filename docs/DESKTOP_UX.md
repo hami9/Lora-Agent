@@ -4,9 +4,9 @@ The proposed desktop client follows the CLI and uses the same Rust application s
 
 ## Shell and navigation
 
-Use Tauri 2, React and TypeScript for the first desktop prototype. Native command handlers validate every request and expose a narrow service surface. Restrict capabilities by window, package UI assets locally, disallow remote navigation and avoid exposing shell or generic filesystem plugins. Tauri's access controls complement the application's per-run grant checks. Validate system webview availability, packaging and idle costs on reference devices before committing a support claim. [Tauri capabilities](https://v2.tauri.app/security/capabilities/) · [Tauri distribution](https://v2.tauri.app/distribute/)
+Use **pure-Rust native UI (`iced 0.14`)** compiled directly into `lora-desktop` with GPU (`wgpu`) and CPU (`tiny-skia`) rendering backends—zero WebView, Electron, HTML/CSS/JS bundles, or HTTP loopback bridges. `LoraApplicationService` and `ApprovalPromptPort` (`GuiApprovalPromptPort`) run in-process over bounded channels so there is no external rendering IPC surface or remote origin risk.
 
-Sidebar groups are **Work** (Dashboard, Chat, Agent Workspace), **Library** (Models, Hardware), and **Manage** (Settings and enabled extensions or training). A narrow window collapses the sidebar into a labeled menu. A persistent status strip shows local/remote destination, selected model, current task and Stop. Hide unavailable experimental screens until enabled. Keep diagnostic details behind an expandable panel.
+The Discord-style obsidian workspace uses a four-region desktop layout: left **Workspace Guild Rail** (`LA` Local Core, `WS` Workspace & RAG, `SG` Security & Broker, `EX` Experimental Lab), **#Channels Sidebar** (`#dashboard`, `#chat`, `#agent-workspace`, `#model-library`, `#hardware-hie`, `#workflows`, `#audit-journal`, `#broker-gate`, `#settings`, plus experimental channels when enabled), **Main Stage** with persistent top Status Strip and `STOP` control, and a collapsible **Live Telemetry Radar** right inspector. A persistent status strip shows local destination, active model, running state and `STOP`. Hide unavailable experimental channels until enabled. Keep diagnostic details behind the toggleable inspector panel.
 
 | Screen | Main content and action | Empty, failure or restricted state |
 | --- | --- | --- |
@@ -46,4 +46,4 @@ Each snapshot binds:
 - Session identifier and anti-spoofing challenge token
 - Audit journal event counter
 
-Verification routines (`verify_desktop_snapshot`) confirm state integrity and detect any UI state tampering before client render. Supported in CLI (`lora status --verify-desktop <PATH>`, `lora-desktop --verify-snapshot <PATH>`), loopback bridge (`GET /api/desktop-snapshot`), and REST API (`GET /v1/desktop/snapshot`, `POST /v1/desktop/verify`).
+Verification routines (`verify_desktop_snapshot`) confirm state integrity and detect any UI state tampering before client render. Supported in CLI (`lora status --verify-desktop <PATH>`, `lora-desktop --verify-snapshot <PATH>`), natively in the pure-Rust `lora-desktop` `#dashboard`/`#settings` views, and REST API (`GET /v1/desktop/snapshot`, `POST /v1/desktop/verify`).

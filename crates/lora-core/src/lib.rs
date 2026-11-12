@@ -50,7 +50,11 @@ pub use benchmark::{
     BenchmarkComparisonControl, BenchmarkReceipt, BenchmarkSample, MetricStats, SoakTestReceipt,
     StageLatencyProfile, BENCHMARK_RECEIPT_DOMAIN_V1, SOAK_TEST_DOMAIN_V1,
 };
-pub use broker::{BrokerSingleUsePermit, BrokerStatus, BrokerVerb, PrivilegedBrokerGate};
+pub use broker::{
+    compute_broker_permit_digest, compute_broker_receipt_digest, verify_broker_permit_digest,
+    verify_broker_receipt, BrokerExecutionReceipt, BrokerSingleUsePermit, BrokerStatus, BrokerVerb,
+    PrivilegedBrokerGate, BROKER_PERMIT_DOMAIN_V1, BROKER_RECEIPT_DOMAIN_V1,
+};
 pub use catalog::{
     evaluate_range_resume, validate_catalog_variant, CatalogVariantDescriptor,
     DownloadResumeCheckpoint, ResumeDecision, MAX_CATALOG_REDIRECTS,

@@ -29,6 +29,17 @@ Defer the broker entirely until a named use case needs it. The future installati
 
 A helper records intent before acting and an outcome or indeterminate status afterwards. Return actionable errors such as `unsupported`, `permission_required`, `scope_changed`, `resource_busy` and `unknown_outcome`. Never repeat a service operation after disconnection until reconciliation by resource identity. Host diagnostics remain read-only even when an administrative helper is installed.
 
+### Privileged Broker Cryptographic Attestation
+
+Both single-use broker permits and executed broker receipts are protected with domain-separated, length-prefixed SHA-256 digests (`R09`):
+
+- **Permit Domain (`BROKER_PERMIT_DOMAIN_V1`)**: `b"lora.broker.permit.v1\0"` binds `session_id`, `challenge_nonce`, and the canonical typed `BrokerVerb` variant (`query_service_status` or `restart_allowlisted_service`) via length-prefixed framing (`compute_broker_permit_digest`, `verify_broker_permit_digest`) to eliminate delimiter ambiguity.
+- **Receipt Domain (`BROKER_RECEIPT_DOMAIN_V1`)**: `b"lora.broker.receipt.v1\0"` binds `schema_version`, `receipt_id`, `permit_id`, `session_id`, `challenge_nonce`, canonical `verb`, bound `request_digest`, `BrokerStatus`, and `executed_at_ms` into `BrokerExecutionReceipt::receipt_sha256` (`compute_broker_receipt_digest`, `verify_broker_receipt`).
+- **Surfaces**:
+  - `lora broker --export-receipt <PATH>` exports and `lora broker --verify-receipt <PATH>` performs fail-closed offline verification of `BrokerExecutionReceipt` files.
+  - `POST /v1/broker/validate` emits the attested `BrokerExecutionReceipt`, and `POST /v1/broker/verify-receipt` verifies submitted broker receipts under `lora.broker.receipt.v1`.
+  - Desktop `/api/broker-status` and `/api/workflow-status` advertise `"broker_attestation": true` with the UI badge `Broker Attestation: Verified Bound (v1)`.
+
 ## Qualification
 
 Run tests on real filesystems for case folding, Unicode aliasing, symlink and mount escapes, Windows junctions, hard links, races during parent rename, revoked scope, file growth, concurrent cancellation and worker descendants surviving supervisor exit. Include headless Linux, a denied macOS privacy prompt and non-admin Windows. Record the OS build, filesystem type, adapter version and explicit unsupported cases for every advertised capability.
