@@ -36,7 +36,7 @@
 ├── apps/
 │   ├── cli/                    # Trusted terminal composition root (lora)
 │   ├── api/                    # Opt-in loopback HTTP/SSE daemon (lora-api)
-│   └── desktop/                # Pure-Rust native Discord-style desktop client (lora-desktop, iced 0.14)
+│   └── desktop/                # Pure-Rust native multi-pane desktop client (lora-desktop, iced 0.14)
 ├── tests/fixtures/             # Deterministic synthetic GGUF fixtures & adversarial tests
 ├── benchmarks/                 # Reproducible performance case manifests
 └── docs/                       # Architecture specifications and ADRs
@@ -167,7 +167,7 @@ lora workflow --demo --validate
 lora workflow --list-receipts
 lora workflow --prune-keep 10
 
-# 21. Launch the pure-Rust native Discord-style desktop client (or dump headless diagnostics)
+# 21. Launch the pure-Rust native multi-pane desktop client (or dump headless diagnostics)
 lora-desktop
 lora-desktop --dump-view-model
 lora-desktop --dump-snapshot

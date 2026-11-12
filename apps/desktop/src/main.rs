@@ -1,4 +1,4 @@
-//! Pure-Rust native Discord-style desktop client (`lora-desktop`) with headless CI diagnostic flags.
+//! Pure-Rust native multi-pane desktop client (`lora-desktop`) with headless CI diagnostic flags.
 
 use clap::Parser;
 use iced::{window, Size};
@@ -19,7 +19,7 @@ use std::sync::{mpsc, Arc, Mutex};
 #[command(
     name = "lora-desktop",
     version,
-    about = "Lora Agent pure-Rust native Discord-style desktop client"
+    about = "Lora Agent pure-Rust native cyberpunk desktop client"
 )]
 struct DesktopCli {
     /// Per-user data directory
@@ -185,7 +185,7 @@ fn main() {
         return;
     }
 
-    // Interactive Pure-Rust Native GUI Mode (Discord-style client via iced 0.14.0)
+    // Interactive Pure-Rust Native GUI Mode (multi-pane HUD client via iced 0.14.0)
     let (event_tx, event_rx) = mpsc::channel::<AppWorkerEvent>();
     let approval_port = Arc::new(GuiApprovalPromptPort::new(event_tx.clone()));
     let service = match LoraApplicationService::open(

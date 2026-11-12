@@ -14,7 +14,7 @@ Selections below are design commitments for the first implementation. Shipping p
 
 ## Later selections
 
-The desktop client (`lora-desktop`) uses **pure-Rust `iced 0.14`** (`wgpu` + `tiny-skia` software fallback, native Markdown progressive streaming, and `cosmic-text` RTL/Unicode shaping) in a Discord-inspired multi-pane desktop layout. Application policy, hardware admission, and `ApprovalPromptPort` trusted consent dialogs run directly in-process over `LoraApplicationService` with zero WebView, Electron, or HTTP loopback UI overhead.
+The desktop client (`lora-desktop`) uses **pure-Rust `iced 0.14`** (`wgpu` + `tiny-skia` software fallback, native Markdown progressive streaming, and `cosmic-text` RTL/Unicode shaping) in a multi-pane cyberpunk HUD workspace layout. Application policy, hardware admission, and `ApprovalPromptPort` trusted consent dialogs run directly in-process over `LoraApplicationService` with zero WebView, Electron, or HTTP loopback UI overhead.
 
 Use an opt-in HTTP adapter (candidate axum) and SSE for external clients, an OpenAPI document for generated types, and native OS credential stores for remote keys. MCP integration comes before a general extension marketplace. A Wasmtime host with explicit imports is the preferred programmable extension path after policy maturity. A dedicated trainer is a separately installed component. Each choice has an integration and removal gate. [API](API_AND_SDK.md) · [Extensions](PLUGIN_SYSTEM.md) · [Training](TRAINING_SYSTEM.md)
 

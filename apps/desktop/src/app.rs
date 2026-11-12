@@ -1,4 +1,4 @@
-//! Pure-Rust native Discord-style desktop client (`LoraDesktopApp`) built on `iced 0.14.0`.
+//! Pure-Rust native multi-pane desktop client (`LoraDesktopApp`) built on `iced 0.14.0`.
 
 use crate::backend::{
     collect_core_telemetry, spawn_broker_attestation, spawn_chat_run, spawn_demo_workflow,
@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
-/// Left guild rail workspaces modeled on a native Discord client.
+/// Left workspace rail badges for the native multi-pane client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceGuild {
     LocalCore,
@@ -75,7 +75,7 @@ impl WorkspaceGuild {
     }
 }
 
-/// Channels in the left `#channels` Discord sidebar mapped onto canonical [`DesktopScreen`] states.
+/// Channels in the left `#channels` navigation sidebar mapped onto canonical [`DesktopScreen`] states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelTab {
     Dashboard,

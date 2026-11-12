@@ -450,7 +450,7 @@ impl CyberPalette {
 }
 
 /// Construct the default Night City Cyberpunk theme with high-contrast dark surfaces.
-pub fn lora_discord_theme() -> Theme {
+pub fn lora_cyberpunk_theme() -> Theme {
     CyberThemePreset::NightCity2077.palette().iced_theme()
 }
 

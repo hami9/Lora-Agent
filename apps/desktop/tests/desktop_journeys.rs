@@ -1,4 +1,4 @@
-//! Pure-Rust native Discord-style desktop UI & headless diagnostic verification suite
+//! Pure-Rust native multi-pane desktop UI & headless diagnostic verification suite
 //! (`docs/DESKTOP_UX.md`, `ADR-0004`, `R09`, `R12`).
 
 use lora_core::{
@@ -160,7 +160,7 @@ fn desktop_headless_diagnostics_and_attestation_cli_e2e() {
 }
 
 #[test]
-fn native_discord_shell_navigation_modal_consent_broker_and_snapshot_journey() {
+fn native_shell_navigation_modal_consent_broker_and_snapshot_journey() {
     let tmp = TempDir::new().expect("tempdir");
     let (mut app, approval_port) = open_test_app(&tmp, false);
 
@@ -173,7 +173,7 @@ fn native_discord_shell_navigation_modal_consent_broker_and_snapshot_journey() {
     assert!(app.experimental_enabled);
     assert_eq!(app.active_channel, ChannelTab::AdapterStudio);
 
-    // Render view trees across multiple Discord channels headlessly
+    // Render view trees across multiple workspace channels headlessly
     for ch in [
         ChannelTab::Dashboard,
         ChannelTab::Chat,

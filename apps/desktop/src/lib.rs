@@ -1,4 +1,4 @@
-//! Pure-Rust native Discord-style desktop client and headless diagnostics (`docs/DESKTOP_UX.md`, `ADR-0004`).
+//! Pure-Rust native multi-pane desktop client and headless diagnostics (`docs/DESKTOP_UX.md`, `ADR-0004`).
 
 pub mod app;
 pub mod backend;
@@ -19,7 +19,7 @@ pub fn load_window_icon() -> Option<iced::window::Icon> {
     iced::window::icon::from_rgba(LORA_ICON_RGBA.to_vec(), LORA_ICON_SIZE, LORA_ICON_SIZE).ok()
 }
 
-/// Load the embedded Lora app logo handle for in-app Discord-style chrome rendering.
+/// Load the embedded Lora app logo handle for in-app chrome rendering.
 pub fn load_logo_handle() -> iced::widget::image::Handle {
     iced::widget::image::Handle::from_rgba(LORA_ICON_SIZE, LORA_ICON_SIZE, LORA_ICON_RGBA.to_vec())
 }
